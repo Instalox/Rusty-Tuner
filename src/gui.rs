@@ -197,16 +197,16 @@ impl TunerApp {
             bg_texture: None,
 
             show_calibration: false,
-            zone_screen: [0.166, 0.292, 0.836, 0.504],
-            zone_strip: [0.145, 0.529, 0.855, 0.603],
-            zone_controls: [0.145, 0.625, 0.855, 0.655],
-            zone_foot_center: [0.506, 0.759],
+            zone_screen: [0.156, 0.292, 0.842, 0.500],
+            zone_strip: [0.206, 0.517, 0.794, 0.576],
+            zone_controls: [0.223, 0.594, 0.769, 0.661],
+            zone_foot_center: [0.504, 0.754],
             zone_foot_r: 0.09,
-            zone_leds_y: 0.730,
-            zone_knob_left: [0.291, 0.197],
-            zone_knob_right: [0.709, 0.197],
-            zone_branding_y: 0.038,
-            zone_labels_y: 0.256,
+            zone_leds_y: 0.731,
+            zone_knob_left: [0.265, 0.195],
+            zone_knob_right: [0.710, 0.196],
+            zone_branding_y: 0.139,
+            zone_labels_y: 0.253,
             calibration_drag: None,
         }
     }
@@ -368,7 +368,7 @@ impl eframe::App for TunerApp {
 
         // Load texture if not already loaded
         let bg_texture = self.bg_texture.get_or_insert_with(|| {
-            let path = std::path::PathBuf::from("images/blank-pedal.png");
+            let path = std::path::PathBuf::from("images/blank-pedal3.png");
             if let Ok(color_image) = load_image_from_path(&path) {
                 ctx.load_texture(
                     "blank-pedal",
@@ -489,9 +489,13 @@ impl eframe::App for TunerApp {
                     ("screen", 1, egui::Pos2::new(px((self.zone_screen[0] + self.zone_screen[2]) / 2.0), py(self.zone_screen[1]))), // top
                     ("screen", 2, egui::Pos2::new(px(self.zone_screen[2]), py((self.zone_screen[1] + self.zone_screen[3]) / 2.0))), // right
                     ("screen", 3, egui::Pos2::new(px((self.zone_screen[0] + self.zone_screen[2]) / 2.0), py(self.zone_screen[3]))), // bottom
+                    ("strip", 0, egui::Pos2::new(px(self.zone_strip[0]), py((self.zone_strip[1] + self.zone_strip[3]) / 2.0))), // left
                     ("strip", 1, egui::Pos2::new(px((self.zone_strip[0] + self.zone_strip[2]) / 2.0), py(self.zone_strip[1]))), // top
+                    ("strip", 2, egui::Pos2::new(px(self.zone_strip[2]), py((self.zone_strip[1] + self.zone_strip[3]) / 2.0))), // right
                     ("strip", 3, egui::Pos2::new(px((self.zone_strip[0] + self.zone_strip[2]) / 2.0), py(self.zone_strip[3]))), // bottom
+                    ("controls", 0, egui::Pos2::new(px(self.zone_controls[0]), py((self.zone_controls[1] + self.zone_controls[3]) / 2.0))), // left
                     ("controls", 1, egui::Pos2::new(px((self.zone_controls[0] + self.zone_controls[2]) / 2.0), py(self.zone_controls[1]))),
+                    ("controls", 2, egui::Pos2::new(px(self.zone_controls[2]), py((self.zone_controls[1] + self.zone_controls[3]) / 2.0))), // right
                     ("controls", 3, egui::Pos2::new(px((self.zone_controls[0] + self.zone_controls[2]) / 2.0), py(self.zone_controls[3]))),
                     ("foot", 1, egui::Pos2::new(px(self.zone_foot_center[0]), py(self.zone_foot_center[1]))), // center
                     ("leds", 1, egui::Pos2::new(px(0.5), py(self.zone_leds_y))),
@@ -519,9 +523,13 @@ impl eframe::App for TunerApp {
                             ("screen", 1) => self.zone_screen[1] = (self.zone_screen[1] + dy).clamp(0.0, 0.5),
                             ("screen", 2) => self.zone_screen[2] = (self.zone_screen[2] + dx).clamp(0.5, 1.0),
                             ("screen", 3) => self.zone_screen[3] = (self.zone_screen[3] + dy).clamp(0.2, 0.8),
+                            ("strip", 0) => self.zone_strip[0] = (self.zone_strip[0] + dx).clamp(0.0, 0.5),
                             ("strip", 1) => self.zone_strip[1] = (self.zone_strip[1] + dy).clamp(0.3, 0.8),
+                            ("strip", 2) => self.zone_strip[2] = (self.zone_strip[2] + dx).clamp(0.5, 1.0),
                             ("strip", 3) => self.zone_strip[3] = (self.zone_strip[3] + dy).clamp(0.4, 0.9),
+                            ("controls", 0) => self.zone_controls[0] = (self.zone_controls[0] + dx).clamp(0.0, 0.5),
                             ("controls", 1) => self.zone_controls[1] = (self.zone_controls[1] + dy).clamp(0.4, 0.9),
+                            ("controls", 2) => self.zone_controls[2] = (self.zone_controls[2] + dx).clamp(0.5, 1.0),
                             ("controls", 3) => self.zone_controls[3] = (self.zone_controls[3] + dy).clamp(0.4, 0.9),
                             ("foot", 1) => {
                                 self.zone_foot_center[0] = (self.zone_foot_center[0] + dx).clamp(0.2, 0.8);
@@ -651,8 +659,12 @@ impl eframe::App for TunerApp {
             screen_ui.set_clip_rect(screen_rect);
             screen_ui.vertical_centered(|ui| {
                 let sh = screen_rect.height();
-                let sw = screen_rect.width();
-                let s = sw.min(sh * 1.5); // scale factor based on smaller dimension
+                let _sw = screen_rect.width();
+
+                // Text takes ~25% of screen height, gauge gets the rest
+                let text_h = sh * 0.22;
+                let note_size = text_h * 0.55;
+                let small_size = (text_h * 0.14).max(8.0);
 
                 ui.add_space(2.0);
                 if let Some(ref err) = self.audio_error {
@@ -664,29 +676,29 @@ impl eframe::App for TunerApp {
                 if active {
                     let abs_cents = self.smoothed_cents.abs();
                     let note_color = gauge::cents_color(abs_cents as f32);
+                    ui.spacing_mut().item_spacing.y = 0.0;
                     ui.horizontal(|ui| {
-                        ui.add_space((ui.available_width() - s * 0.35) / 2.0);
-                        ui.label(egui::RichText::new(&self.display_note).size(s * 0.14).color(note_color).strong());
+                        ui.add_space((ui.available_width() - note_size * 1.5) / 2.0);
+                        ui.label(egui::RichText::new(&self.display_note).size(note_size).color(note_color).strong());
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::BOTTOM), |ui| {
-                            ui.label(egui::RichText::new(format!("{}", self.display_octave)).size(s * 0.06).color(note_color.gamma_multiply(0.7)));
+                            ui.label(egui::RichText::new(format!("{}", self.display_octave)).size(note_size * 0.45).color(note_color.gamma_multiply(0.7)));
                         });
                     });
-                    ui.label(egui::RichText::new(format!("{:.1} Hz", self.detected_freq)).size(s * 0.03).color(egui::Color32::from_gray(140)));
-                    let cents_text = if abs_cents < 1.0 { "IN TUNE".to_string() } else {
-                        let arrow = if self.smoothed_cents > 0.0 { "+" } else { "" };
-                        format!("{arrow}{:.1} cents", self.smoothed_cents)
-                    };
-                    ui.label(egui::RichText::new(cents_text).size(s * 0.025).color(
+                    ui.label(egui::RichText::new(format!("{:.1} Hz  {}", self.detected_freq, {
+                        if abs_cents < 1.0 { "IN TUNE".to_string() } else {
+                            let arrow = if self.smoothed_cents > 0.0 { "+" } else { "" };
+                            format!("{arrow}{:.1}¢", self.smoothed_cents)
+                        }
+                    })).size(small_size).color(
                         if abs_cents < 3.0 { egui::Color32::from_rgb(0, 220, 100) } else { note_color.gamma_multiply(0.9) }
                     ));
                 } else {
-                    ui.label(egui::RichText::new("—").size(s * 0.14).color(egui::Color32::from_gray(40)).strong());
-                    ui.label(egui::RichText::new("Play a note").size(s * 0.03).color(egui::Color32::from_gray(55)));
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.label(egui::RichText::new("—").size(note_size).color(egui::Color32::from_gray(40)).strong());
+                    ui.label(egui::RichText::new("Play a note").size(small_size).color(egui::Color32::from_gray(55)));
                 }
 
-                ui.add_space(1.0);
                 gauge::draw_gauge(ui, self.smoothed_cents, self.clarity, self.needle_angle, time);
-                ui.add_space(1.0);
                 gauge::draw_strobe(ui, self.smoothed_cents, self.clarity, time);
             });
 

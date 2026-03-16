@@ -31,22 +31,22 @@ pub fn cents_color(abs_cents: f32) -> Color32 {
 }
 
 pub fn draw_gauge(ui: &mut egui::Ui, cents: f64, clarity: f64, needle_angle: f32, time: f64) {
-    let avail_h = ui.available_height() * 0.6;
+    let avail_h = ui.available_height() - 20.0; // reserve ~20px for strobe below
     let avail_w = ui.available_width();
-    let desired_h = avail_h.clamp(40.0, 200.0);
-    let desired_size = Vec2::new(avail_w.min(380.0), desired_h);
+    let desired_h = avail_h.max(30.0);
+    let desired_size = Vec2::new(avail_w, desired_h);
     let (response, painter) = ui.allocate_painter(desired_size, egui::Sense::hover());
     let rect = response.rect;
 
-    // Scale everything relative to a base radius that fits both width and height.
-    // The semicircle needs: width >= 2*(radius + margin), height >= radius + margin + bottom_pad
-    let margin_frac = 0.12; // fraction of radius for arc thickness + ticks
-    let max_r_from_w = rect.width() / (2.0 * (1.0 + margin_frac + 0.12));
-    let max_r_from_h = (rect.height() - 4.0) / (1.0 + margin_frac + 0.08);
+    // Semicircle: width needs 2*radius, height needs ~radius
+    // Use the tighter constraint but bias toward filling width
+    let max_r_from_w = rect.width() * 0.42;
+    let max_r_from_h = rect.height() * 0.85;
     let radius = max_r_from_w.min(max_r_from_h).max(20.0);
     let s = radius / 100.0; // scale factor (1.0 at radius=100)
 
-    let center = Pos2::new(rect.center().x, rect.bottom() - 4.0 * s.max(0.3));
+    let bottom_pad = (8.0 * s).max(2.0);
+    let center = Pos2::new(rect.center().x, rect.bottom() - bottom_pad);
 
     let arc_start = PI;
     let arc_end = 0.0;
