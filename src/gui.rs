@@ -65,18 +65,48 @@ pub struct TunerApp {
     selected_device: usize, // 0 = "Default", 1+ = named devices
 }
 
+fn draw_3d_button(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    fill: egui::Color32,
+    is_pressed: bool,
+    corner_radius: f32,
+) -> egui::Rect {
+    if is_pressed {
+        let pressed_rect = rect.translate(egui::vec2(0.0, 2.0));
+        painter.rect_filled(pressed_rect, corner_radius, fill.linear_multiply(0.8));
+        painter.rect_stroke(pressed_rect, corner_radius, egui::Stroke::new(1.0, egui::Color32::from_black_alpha(200)), egui::StrokeKind::Outside);
+        painter.rect_stroke(pressed_rect, corner_radius, egui::Stroke::new(1.5, egui::Color32::from_black_alpha(100)), egui::StrokeKind::Inside);
+        pressed_rect
+    } else {
+        let shadow_rect = rect.translate(egui::vec2(0.0, 3.0));
+        painter.rect_filled(shadow_rect, corner_radius, egui::Color32::from_black_alpha(180));
+        painter.rect_filled(rect, corner_radius, fill);
+        painter.line_segment(
+            [rect.left_top() + egui::vec2(corner_radius, 1.0), rect.right_top() + egui::vec2(-corner_radius, 1.0)],
+            egui::Stroke::new(1.0, egui::Color32::from_white_alpha(30))
+        );
+        painter.line_segment(
+            [rect.left_bottom() + egui::vec2(corner_radius, -1.0), rect.right_bottom() + egui::vec2(-corner_radius, -1.0)],
+            egui::Stroke::new(1.0, egui::Color32::from_black_alpha(80))
+        );
+        painter.rect_stroke(rect, corner_radius, egui::Stroke::new(1.0, egui::Color32::from_black_alpha(200)), egui::StrokeKind::Outside);
+        rect
+    }
+}
+
 impl TunerApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // Dark theme
         let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = egui::Color32::from_rgb(22, 24, 30);
-        visuals.window_fill = egui::Color32::from_rgb(22, 24, 30);
-        visuals.extreme_bg_color = egui::Color32::from_rgb(16, 18, 22);
-        visuals.faint_bg_color = egui::Color32::from_rgb(30, 33, 40);
-        visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(35, 38, 45);
-        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(40, 44, 52);
-        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(50, 55, 65);
-        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(55, 60, 72);
+        visuals.panel_fill = egui::Color32::from_rgb(25, 27, 30);
+        visuals.window_fill = egui::Color32::from_rgb(25, 27, 30);
+        visuals.extreme_bg_color = egui::Color32::from_rgb(12, 14, 16);
+        visuals.faint_bg_color = egui::Color32::from_rgb(20, 22, 24);
+        visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(30, 32, 35);
+        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(35, 38, 42);
+        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(45, 48, 55);
+        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(50, 55, 65);
         cc.egui_ctx.set_visuals(visuals);
 
         let input_devices = audio::list_input_devices();
@@ -290,7 +320,39 @@ impl eframe::App for TunerApp {
         }
 
         // ---- UI ----
-        egui::CentralPanel::default().show(ctx, |ui| {
+        let frame = egui::Frame::default()
+            .fill(egui::Color32::from_rgb(32, 34, 38)) // Metal pedal color
+            .inner_margin(egui::Margin::same(16));
+
+        egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
+            // Draw pedal edge and screws
+            let rect = ui.max_rect();
+            let painter = ui.painter();
+            
+            // Subtle edge highlight for 3D pedal chassis
+            painter.rect_stroke(rect, 16.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 55, 60)), egui::StrokeKind::Inside);
+            painter.rect_stroke(rect.shrink(1.0), 15.0, egui::Stroke::new(3.0, egui::Color32::from_rgb(10, 10, 12)), egui::StrokeKind::Inside);
+            painter.rect_stroke(rect.shrink(4.0), 12.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(20, 22, 24)), egui::StrokeKind::Inside);
+
+            // Screws in corners
+            let screw_radius = 5.0;
+            let inset = 24.0;
+            let corners = [
+                rect.left_top() + egui::vec2(inset, inset),
+                rect.right_top() + egui::vec2(-inset, inset),
+                rect.left_bottom() + egui::vec2(inset, -inset),
+                rect.right_bottom() + egui::vec2(-inset, -inset),
+            ];
+            for &pos in &corners {
+                painter.circle_filled(pos + egui::vec2(1.0, 1.0), screw_radius, egui::Color32::from_black_alpha(180));
+                painter.circle_filled(pos, screw_radius, egui::Color32::from_rgb(100, 105, 110));
+                painter.circle_stroke(pos, screw_radius, egui::Stroke::new(0.5, egui::Color32::from_rgb(150, 155, 160)));
+                painter.line_segment(
+                    [pos + egui::vec2(-3.0, -3.0), pos + egui::vec2(3.0, 3.0)],
+                    egui::Stroke::new(1.5, egui::Color32::from_rgb(30, 30, 30))
+                );
+            }
+
             ui.vertical_centered(|ui| {
                 ui.add_space(6.0);
 
@@ -302,9 +364,15 @@ impl eframe::App for TunerApp {
 
                 // Header bar — styled settings row
                 let header_frame = egui::Frame::NONE
-                    .fill(egui::Color32::from_rgb(26, 28, 35))
-                    .corner_radius(8.0)
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(38)))
+                    .fill(egui::Color32::from_rgb(22, 24, 28))
+                    .corner_radius(6.0)
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 4],
+                        blur: 8,
+                        spread: 0,
+                        color: egui::Color32::from_black_alpha(150),
+                    })
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(15, 16, 18)))
                     .inner_margin(egui::Margin::symmetric(10, 7));
 
                 header_frame.show(ui, |ui| {
@@ -363,11 +431,17 @@ impl eframe::App for TunerApp {
 
                 // Input device selector
                 if !self.input_devices.is_empty() {
-                    ui.add_space(3.0);
+                    ui.add_space(8.0);
                     let device_frame = egui::Frame::NONE
-                        .fill(egui::Color32::from_rgb(26, 28, 35))
+                        .fill(egui::Color32::from_rgb(22, 24, 28))
                         .corner_radius(6.0)
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(38)))
+                        .shadow(egui::epaint::Shadow {
+                            offset: [0, 4],
+                            blur: 8,
+                            spread: 0,
+                            color: egui::Color32::from_black_alpha(150),
+                        })
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(15, 16, 18)))
                         .inner_margin(egui::Margin::symmetric(10, 5));
 
                     device_frame.show(ui, |ui| {
@@ -550,29 +624,34 @@ impl eframe::App for TunerApp {
                 let auto_hovered = auto_response.hovered();
 
                 let auto_fill = if auto_active {
-                    egui::Color32::from_rgb(40, 55, 70)
+                    egui::Color32::from_rgb(60, 80, 100)
                 } else if auto_hovered {
-                    egui::Color32::from_rgb(40, 43, 52)
+                    egui::Color32::from_rgb(45, 48, 55)
                 } else {
-                    egui::Color32::from_rgb(30, 33, 40)
+                    egui::Color32::from_rgb(35, 38, 45)
                 };
 
-                ui.painter().rect_filled(auto_rect, 8.0, auto_fill);
+                let is_pressed = auto_response.is_pointer_button_down_on();
+                let actual_auto_rect = draw_3d_button(ui.painter(), auto_rect, auto_fill, is_pressed, 6.0);
+
                 if auto_active {
-                    ui.painter().rect_stroke(auto_rect, 8.0, egui::Stroke::new(1.5, egui::Color32::from_rgb(70, 130, 200).gamma_multiply(0.6)), egui::StrokeKind::Outside);
-                } else {
-                    ui.painter().rect_stroke(auto_rect, 8.0, egui::Stroke::new(1.0, egui::Color32::from_gray(45)), egui::StrokeKind::Outside);
+                    // Small LED indicator
+                    ui.painter().circle_filled(
+                        actual_auto_rect.center() + egui::vec2(0.0, 8.0),
+                        2.0,
+                        egui::Color32::from_rgb(100, 200, 255),
+                    );
                 }
 
                 ui.painter().text(
-                    auto_rect.center(),
+                    actual_auto_rect.center() - egui::vec2(0.0, if auto_active { 4.0 } else { 0.0 }),
                     egui::Align2::CENTER_CENTER,
                     "AUTO",
                     egui::FontId::proportional(11.0),
                     if auto_active {
-                        egui::Color32::from_rgb(130, 180, 240)
+                        egui::Color32::from_rgb(200, 230, 255)
                     } else {
-                        egui::Color32::from_gray(120)
+                        egui::Color32::from_gray(140)
                     },
                 );
 
@@ -613,32 +692,32 @@ impl eframe::App for TunerApp {
 
                     // Background fill
                     let fill = if is_selected {
-                        egui::Color32::from_rgb(40, 55, 70)
+                        egui::Color32::from_rgb(60, 80, 100)
                     } else if is_auto_detected {
                         let c = gauge::cents_color(self.auto_string_cents.abs() as f32);
                         egui::Color32::from_rgb(
-                            (c.r() as f32 * 0.15) as u8 + 22,
-                            (c.g() as f32 * 0.15) as u8 + 24,
-                            (c.b() as f32 * 0.15) as u8 + 28,
+                            (c.r() as f32 * 0.25) as u8 + 30,
+                            (c.g() as f32 * 0.25) as u8 + 32,
+                            (c.b() as f32 * 0.25) as u8 + 36,
                         )
                     } else if hovered {
-                        egui::Color32::from_rgb(40, 43, 52)
+                        egui::Color32::from_rgb(45, 48, 55)
                     } else {
-                        egui::Color32::from_rgb(30, 33, 40)
+                        egui::Color32::from_rgb(35, 38, 45)
                     };
 
-                    ui.painter().rect_filled(btn_rect, 8.0, fill);
+                    let is_pressed = note_response.is_pointer_button_down_on() || play_response.is_pointer_button_down_on();
+                    let actual_btn_rect = draw_3d_button(ui.painter(), btn_rect, fill, is_pressed, 6.0);
 
-                    // Border
-                    let border_color = if is_selected {
-                        egui::Color32::from_rgb(70, 130, 200).gamma_multiply(0.6)
-                    } else if is_auto_detected {
-                        gauge::cents_color(self.auto_string_cents.abs() as f32).gamma_multiply(0.4)
-                    } else {
-                        egui::Color32::from_gray(45)
-                    };
-                    let border_width = if is_selected || is_auto_detected { 1.5 } else { 1.0 };
-                    ui.painter().rect_stroke(btn_rect, 8.0, egui::Stroke::new(border_width, border_color), egui::StrokeKind::Outside);
+                    // Recompute note/play rects based on actual_btn_rect (handles pressed offset)
+                    let actual_note_rect = egui::Rect::from_min_max(
+                        actual_btn_rect.min,
+                        egui::Pos2::new(actual_btn_rect.right(), actual_btn_rect.bottom() - 13.0),
+                    );
+                    let actual_play_rect = egui::Rect::from_min_max(
+                        egui::Pos2::new(actual_btn_rect.left(), actual_btn_rect.bottom() - 13.0),
+                        actual_btn_rect.max,
+                    );
 
                     // Note name
                     let note_color = if is_selected {
@@ -646,11 +725,11 @@ impl eframe::App for TunerApp {
                     } else if is_auto_detected {
                         gauge::cents_color(self.auto_string_cents.abs() as f32)
                     } else {
-                        egui::Color32::from_gray(150)
+                        egui::Color32::from_gray(170)
                     };
 
                     ui.painter().text(
-                        egui::Pos2::new(note_rect.center().x, note_rect.center().y - 1.0),
+                        egui::Pos2::new(actual_note_rect.center().x, actual_note_rect.center().y - 6.0),
                         egui::Align2::CENTER_CENTER,
                         s.name,
                         egui::FontId::proportional(15.0),
@@ -660,29 +739,43 @@ impl eframe::App for TunerApp {
                     // Divider line between note and play area
                     ui.painter().line_segment(
                         [
-                            egui::Pos2::new(btn_rect.left() + 4.0, play_rect.top()),
-                            egui::Pos2::new(btn_rect.right() - 4.0, play_rect.top()),
+                            egui::Pos2::new(actual_btn_rect.left() + 4.0, actual_play_rect.top()),
+                            egui::Pos2::new(actual_btn_rect.right() - 4.0, actual_play_rect.top()),
                         ],
-                        egui::Stroke::new(0.5, egui::Color32::from_gray(50)),
+                        egui::Stroke::new(0.5, egui::Color32::from_black_alpha(100)),
                     );
 
                     // Play indicator
                     let play_color = if is_playing {
-                        egui::Color32::from_rgb(0, 200, 90)
+                        egui::Color32::from_rgb(0, 255, 120)
                     } else if play_response.hovered() {
-                        egui::Color32::from_gray(120)
+                        egui::Color32::from_gray(150)
                     } else {
-                        egui::Color32::from_gray(70)
+                        egui::Color32::from_gray(90)
                     };
 
                     let play_icon = if is_playing { "\u{25A0}" } else { "\u{25B6}" };
                     ui.painter().text(
-                        egui::Pos2::new(play_rect.center().x, play_rect.center().y + 0.5),
+                        egui::Pos2::new(actual_play_rect.center().x, actual_play_rect.center().y + 0.5),
                         egui::Align2::CENTER_CENTER,
                         play_icon,
                         egui::FontId::proportional(8.0),
                         play_color,
                     );
+                    
+                    // Small LED for selection/auto right below the note name
+                    if is_selected || is_auto_detected {
+                        let led_color = if is_selected {
+                            egui::Color32::from_rgb(100, 200, 255)
+                        } else {
+                            gauge::cents_color(self.auto_string_cents.abs() as f32)
+                        };
+                        ui.painter().circle_filled(
+                            egui::Pos2::new(actual_note_rect.center().x, actual_note_rect.bottom() - 3.5),
+                            2.0,
+                            led_color,
+                        );
+                    }
 
                     // Hover tooltip
                     if note_response.hovered() {

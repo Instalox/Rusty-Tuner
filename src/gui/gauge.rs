@@ -35,6 +35,16 @@ pub fn draw_gauge(ui: &mut egui::Ui, cents: f64, clarity: f64, needle_angle: f32
     let (response, painter) = ui.allocate_painter(desired_size, egui::Sense::hover());
     let rect = response.rect;
 
+    // Draw bezel / LCD background
+    let screen_rect = rect.shrink(4.0);
+    // Outer bezel
+    painter.rect_filled(screen_rect.expand(2.0), 6.0, Color32::from_rgb(30, 32, 35));
+    painter.rect_stroke(screen_rect.expand(2.0), 8.0, Stroke::new(1.5, Color32::from_rgb(15, 16, 18)), egui::StrokeKind::Outside);
+    // Inner LCD
+    painter.rect_filled(screen_rect, 6.0, Color32::from_rgb(12, 14, 18));
+    // Inner shadow effect via inset lines
+    painter.rect_stroke(screen_rect, 6.0, Stroke::new(2.5, Color32::from_black_alpha(180)), egui::StrokeKind::Inside);
+
     let center = Pos2::new(rect.center().x, rect.bottom() - 24.0);
     let radius = (rect.width() * 0.40).min(145.0);
 
@@ -205,9 +215,15 @@ pub fn draw_strobe(ui: &mut egui::Ui, cents: f64, clarity: f64, time: f64) {
     let (response, painter) = ui.allocate_painter(Vec2::new(width, height), egui::Sense::hover());
     let rect = response.rect;
 
+    // Bezel
+    painter.rect_filled(rect.expand(2.0), 4.0, Color32::from_rgb(30, 32, 35));
+    painter.rect_stroke(rect.expand(2.0), 6.0, Stroke::new(1.5, Color32::from_rgb(15, 16, 18)), egui::StrokeKind::Outside);
+    // Inner LCD
+    painter.rect_filled(rect, 4.0, Color32::from_rgb(12, 14, 18));
+    painter.rect_stroke(rect, 4.0, Stroke::new(2.5, Color32::from_black_alpha(180)), egui::StrokeKind::Inside);
+
     if clarity < 0.01 {
         // Idle — dim empty bar
-        painter.rect_filled(rect, 4.0, Color32::from_gray(25));
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -219,9 +235,6 @@ pub fn draw_strobe(ui: &mut egui::Ui, cents: f64, clarity: f64, time: f64) {
     }
 
     let abs_cents = (cents as f32).abs();
-
-    // Background
-    painter.rect_filled(rect, 4.0, Color32::from_rgb(14, 16, 20));
 
     // Strobe pattern: vertical bars that scroll based on cents offset.
     // Speed is proportional to cents — at 0 cents, bars are frozen.
