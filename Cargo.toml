@@ -1,0 +1,11 @@
+[package]
+name = "rusty-tuner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cpal = "0.17"
+eframe = "0.33"
+egui_plot = "0.34"
+pitch-detection = "0.2"
+anyhow = "1"
