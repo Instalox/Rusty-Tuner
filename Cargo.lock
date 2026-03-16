@@ -2742,6 +2742,7 @@ dependencies = [
  "cpal",
  "eframe",
  "egui_plot",
+ "image",
  "pitch-detection",
 ]
 

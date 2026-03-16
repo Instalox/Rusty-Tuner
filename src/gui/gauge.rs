@@ -31,29 +31,31 @@ pub fn cents_color(abs_cents: f32) -> Color32 {
 }
 
 pub fn draw_gauge(ui: &mut egui::Ui, cents: f64, clarity: f64, needle_angle: f32, time: f64) {
-    let desired_size = Vec2::new(ui.available_width().min(380.0), 200.0);
+    let avail_h = ui.available_height() * 0.6;
+    let avail_w = ui.available_width();
+    let desired_h = avail_h.clamp(40.0, 200.0);
+    let desired_size = Vec2::new(avail_w.min(380.0), desired_h);
     let (response, painter) = ui.allocate_painter(desired_size, egui::Sense::hover());
     let rect = response.rect;
 
-    // Draw bezel / LCD background
-    let screen_rect = rect.shrink(4.0);
-    // Outer bezel
-    painter.rect_filled(screen_rect.expand(2.0), 6.0, Color32::from_rgb(30, 32, 35));
-    painter.rect_stroke(screen_rect.expand(2.0), 8.0, Stroke::new(1.5, Color32::from_rgb(15, 16, 18)), egui::StrokeKind::Outside);
-    // Inner LCD
-    painter.rect_filled(screen_rect, 6.0, Color32::from_rgb(12, 14, 18));
-    // Inner shadow effect via inset lines
-    painter.rect_stroke(screen_rect, 6.0, Stroke::new(2.5, Color32::from_black_alpha(180)), egui::StrokeKind::Inside);
+    // Scale everything relative to a base radius that fits both width and height.
+    // The semicircle needs: width >= 2*(radius + margin), height >= radius + margin + bottom_pad
+    let margin_frac = 0.12; // fraction of radius for arc thickness + ticks
+    let max_r_from_w = rect.width() / (2.0 * (1.0 + margin_frac + 0.12));
+    let max_r_from_h = (rect.height() - 4.0) / (1.0 + margin_frac + 0.08);
+    let radius = max_r_from_w.min(max_r_from_h).max(20.0);
+    let s = radius / 100.0; // scale factor (1.0 at radius=100)
 
-    let center = Pos2::new(rect.center().x, rect.bottom() - 24.0);
-    let radius = (rect.width() * 0.40).min(145.0);
+    let center = Pos2::new(rect.center().x, rect.bottom() - 4.0 * s.max(0.3));
 
     let arc_start = PI;
     let arc_end = 0.0;
-    let num_segments = 120;
+    let num_segments = 80;
+    let arc_width = (10.0 * s).max(3.0);
+    let border_margin = (12.0 * s).max(4.0);
 
     // Outer arc — thin border
-    let outer_r = radius + 16.0;
+    let outer_r = radius + border_margin;
     for i in 0..num_segments {
         let t0 = i as f32 / num_segments as f32;
         let t1 = (i + 1) as f32 / num_segments as f32;
@@ -61,7 +63,7 @@ pub fn draw_gauge(ui: &mut egui::Ui, cents: f64, clarity: f64, needle_angle: f32
         let a1 = arc_start + (arc_end - arc_start) * t1;
         let p0 = Pos2::new(center.x + outer_r * a0.cos(), center.y - outer_r * a0.sin());
         let p1 = Pos2::new(center.x + outer_r * a1.cos(), center.y - outer_r * a1.sin());
-        painter.line_segment([p0, p1], Stroke::new(1.5, Color32::from_gray(50)));
+        painter.line_segment([p0, p1], Stroke::new((1.5 * s).max(0.5), Color32::from_gray(50)));
     }
 
     // Main colored arc
@@ -77,41 +79,43 @@ pub fn draw_gauge(ui: &mut egui::Ui, cents: f64, clarity: f64, needle_angle: f32
         let p0 = Pos2::new(center.x + radius * a0.cos(), center.y - radius * a0.sin());
         let p1 = Pos2::new(center.x + radius * a1.cos(), center.y - radius * a1.sin());
 
-        // Brighter near needle when active, dim background otherwise
         let brightness = if clarity > 0.0 {
             let needle_t = (needle_angle - arc_start) / (arc_end - arc_start);
             let seg_t = (t0 + t1) / 2.0;
             let dist = (needle_t - seg_t).abs();
-            // Glow near needle
             0.25 + 0.6 * (-dist * dist * 80.0).exp()
         } else {
             0.15
         };
 
-        painter.line_segment([p0, p1], Stroke::new(10.0, color.gamma_multiply(brightness)));
+        painter.line_segment([p0, p1], Stroke::new(arc_width, color.gamma_multiply(brightness)));
     }
 
     // Inner arc — thin border
-    let inner_r = radius - 16.0;
-    for i in 0..num_segments {
-        let t0 = i as f32 / num_segments as f32;
-        let t1 = (i + 1) as f32 / num_segments as f32;
-        let a0 = arc_start + (arc_end - arc_start) * t0;
-        let a1 = arc_start + (arc_end - arc_start) * t1;
-        let p0 = Pos2::new(center.x + inner_r * a0.cos(), center.y - inner_r * a0.sin());
-        let p1 = Pos2::new(center.x + inner_r * a1.cos(), center.y - inner_r * a1.sin());
-        painter.line_segment([p0, p1], Stroke::new(1.5, Color32::from_gray(50)));
+    let inner_r = radius - border_margin;
+    if inner_r > 5.0 {
+        for i in 0..num_segments {
+            let t0 = i as f32 / num_segments as f32;
+            let t1 = (i + 1) as f32 / num_segments as f32;
+            let a0 = arc_start + (arc_end - arc_start) * t0;
+            let a1 = arc_start + (arc_end - arc_start) * t1;
+            let p0 = Pos2::new(center.x + inner_r * a0.cos(), center.y - inner_r * a0.sin());
+            let p1 = Pos2::new(center.x + inner_r * a1.cos(), center.y - inner_r * a1.sin());
+            painter.line_segment([p0, p1], Stroke::new((1.5 * s).max(0.5), Color32::from_gray(50)));
+        }
     }
 
     // Tick marks
+    let tick_ext = (16.0 * s).max(4.0);
+    let tick_ext_major = (20.0 * s).max(6.0);
     for &tick_cents in &[-50.0_f32, -25.0, -10.0, -5.0, 0.0, 5.0, 10.0, 25.0, 50.0] {
         let t = (tick_cents + 50.0) / 100.0;
         let angle = arc_start + (arc_end - arc_start) * t;
 
         let is_major = tick_cents.abs() == 0.0 || tick_cents.abs() == 25.0 || tick_cents.abs() == 50.0;
-        let tick_inner = if is_major { radius - 20.0 } else { radius - 14.0 };
-        let tick_outer = if is_major { radius + 20.0 } else { radius + 14.0 };
-        let tick_width = if tick_cents == 0.0 { 2.5 } else if is_major { 1.5 } else { 1.0 };
+        let tick_inner = if is_major { radius - tick_ext_major } else { radius - tick_ext };
+        let tick_outer = if is_major { radius + tick_ext_major } else { radius + tick_ext };
+        let tick_width = if tick_cents == 0.0 { (2.5 * s).max(1.0) } else if is_major { (1.5 * s).max(0.5) } else { (1.0 * s).max(0.5) };
         let tick_color = if tick_cents == 0.0 {
             GREEN.gamma_multiply(0.8)
         } else {
@@ -122,9 +126,8 @@ pub fn draw_gauge(ui: &mut egui::Ui, cents: f64, clarity: f64, needle_angle: f32
         let p_outer = Pos2::new(center.x + tick_outer * angle.cos(), center.y - tick_outer * angle.sin());
         painter.line_segment([p_inner, p_outer], Stroke::new(tick_width, tick_color));
 
-        // Labels for major ticks
         if is_major {
-            let label_r = tick_outer + 14.0;
+            let label_r = tick_outer + (10.0 * s).max(4.0);
             let label_pos = Pos2::new(
                 center.x + label_r * angle.cos(),
                 center.y - label_r * angle.sin(),
@@ -138,7 +141,7 @@ pub fn draw_gauge(ui: &mut egui::Ui, cents: f64, clarity: f64, needle_angle: f32
                 label_pos,
                 egui::Align2::CENTER_CENTER,
                 label,
-                egui::FontId::proportional(10.0),
+                egui::FontId::proportional((10.0 * s).max(6.0)),
                 Color32::from_gray(110),
             );
         }
@@ -146,7 +149,7 @@ pub fn draw_gauge(ui: &mut egui::Ui, cents: f64, clarity: f64, needle_angle: f32
 
     // Needle
     if clarity > 0.0 {
-        let needle_len = radius - 18.0;
+        let needle_len = inner_r.max(10.0);
         let tip = Pos2::new(
             center.x + needle_len * needle_angle.cos(),
             center.y - needle_len * needle_angle.sin(),
@@ -157,24 +160,26 @@ pub fn draw_gauge(ui: &mut egui::Ui, cents: f64, clarity: f64, needle_angle: f32
         let alpha = (clarity as f32 * 1.2).clamp(0.5, 1.0);
 
         // Needle shadow
-        let shadow_offset = Vec2::new(1.5, 1.5);
-        let shadow_tip = Pos2::new(tip.x + shadow_offset.x, tip.y + shadow_offset.y);
-        let shadow_center = Pos2::new(center.x + shadow_offset.x, center.y + shadow_offset.y);
+        let so = (1.5 * s).max(0.5);
+        let shadow_tip = Pos2::new(tip.x + so, tip.y + so);
+        let shadow_center = Pos2::new(center.x + so, center.y + so);
         painter.line_segment(
             [shadow_center, shadow_tip],
-            Stroke::new(3.5, Color32::from_black_alpha(60)),
+            Stroke::new((3.5 * s).max(1.5), Color32::from_black_alpha(60)),
         );
 
         // Needle body
         painter.line_segment(
             [center, tip],
-            Stroke::new(2.5, needle_color.gamma_multiply(alpha)),
+            Stroke::new((2.5 * s).max(1.0), needle_color.gamma_multiply(alpha)),
         );
 
         // Hub
-        painter.circle_filled(center, 7.0, DIM);
-        painter.circle_filled(center, 5.0, needle_color.gamma_multiply(alpha));
-        painter.circle_stroke(center, 7.0, Stroke::new(1.0, Color32::from_gray(70)));
+        let hub_r = (7.0 * s).max(3.0);
+        let hub_inner = (5.0 * s).max(2.0);
+        painter.circle_filled(center, hub_r, DIM);
+        painter.circle_filled(center, hub_inner, needle_color.gamma_multiply(alpha));
+        painter.circle_stroke(center, hub_r, Stroke::new((1.0 * s).max(0.5), Color32::from_gray(70)));
 
         // Pulsing in-tune glow
         if clamped_cents < 3.0 {
@@ -183,26 +188,28 @@ pub fn draw_gauge(ui: &mut egui::Ui, cents: f64, clarity: f64, needle_angle: f32
             let glow_alpha = (intensity * pulse * 50.0) as u8;
             let top_angle = PI / 2.0;
             let glow_pos = Pos2::new(
-                center.x + (radius + 2.0) * top_angle.cos(),
-                center.y - (radius + 2.0) * top_angle.sin(),
+                center.x + (radius + 2.0 * s) * top_angle.cos(),
+                center.y - (radius + 2.0 * s) * top_angle.sin(),
             );
-            painter.circle_filled(glow_pos, 18.0, Color32::from_rgba_unmultiplied(0, 220, 100, glow_alpha / 2));
-            painter.circle_filled(glow_pos, 10.0, Color32::from_rgba_unmultiplied(0, 255, 110, glow_alpha));
-            painter.circle_filled(glow_pos, 5.0, Color32::from_rgba_unmultiplied(200, 255, 220, glow_alpha));
+            painter.circle_filled(glow_pos, 18.0 * s, Color32::from_rgba_unmultiplied(0, 220, 100, glow_alpha / 2));
+            painter.circle_filled(glow_pos, 10.0 * s, Color32::from_rgba_unmultiplied(0, 255, 110, glow_alpha));
+            painter.circle_filled(glow_pos, 5.0 * s, Color32::from_rgba_unmultiplied(200, 255, 220, glow_alpha));
         }
     } else {
         // No signal — dim hub
-        painter.circle_filled(center, 7.0, DIM);
-        painter.circle_filled(center, 5.0, Color32::from_gray(55));
-        painter.circle_stroke(center, 7.0, Stroke::new(1.0, Color32::from_gray(45)));
+        let hub_r = (7.0 * s).max(3.0);
+        let hub_inner = (5.0 * s).max(2.0);
+        painter.circle_filled(center, hub_r, DIM);
+        painter.circle_filled(center, hub_inner, Color32::from_gray(55));
+        painter.circle_stroke(center, hub_r, Stroke::new((1.0 * s).max(0.5), Color32::from_gray(45)));
     }
 
     // "CENTS" label
     painter.text(
-        Pos2::new(center.x, center.y - 16.0),
+        Pos2::new(center.x, center.y - (16.0 * s).max(6.0)),
         egui::Align2::CENTER_CENTER,
         "CENTS",
-        egui::FontId::proportional(10.0),
+        egui::FontId::proportional((10.0 * s).max(6.0)),
         Color32::from_gray(70),
     );
 }
@@ -211,16 +218,9 @@ pub fn draw_gauge(ui: &mut egui::Ui, cents: f64, clarity: f64, needle_angle: f32
 /// At exactly 0 cents, the pattern freezes. Activates only when |cents| < threshold.
 pub fn draw_strobe(ui: &mut egui::Ui, cents: f64, clarity: f64, time: f64) {
     let width = ui.available_width().min(360.0);
-    let height = 32.0;
+    let height = ui.available_height().min(32.0).max(16.0);
     let (response, painter) = ui.allocate_painter(Vec2::new(width, height), egui::Sense::hover());
     let rect = response.rect;
-
-    // Bezel
-    painter.rect_filled(rect.expand(2.0), 4.0, Color32::from_rgb(30, 32, 35));
-    painter.rect_stroke(rect.expand(2.0), 6.0, Stroke::new(1.5, Color32::from_rgb(15, 16, 18)), egui::StrokeKind::Outside);
-    // Inner LCD
-    painter.rect_filled(rect, 4.0, Color32::from_rgb(12, 14, 18));
-    painter.rect_stroke(rect, 4.0, Stroke::new(2.5, Color32::from_black_alpha(180)), egui::StrokeKind::Inside);
 
     if clarity < 0.01 {
         // Idle — dim empty bar
@@ -319,6 +319,6 @@ pub fn draw_strobe(ui: &mut egui::Ui, cents: f64, clarity: f64, time: f64) {
         Stroke::new(1.5, Color32::from_rgba_unmultiplied(255, 255, 255, 60)),
     );
 
-    // Border
-    painter.rect_stroke(rect, 4.0, Stroke::new(1.0, Color32::from_gray(40)), egui::StrokeKind::Outside);
+    // Border (Optional subtle line to frame the visual)
+    painter.rect_stroke(rect, 4.0, Stroke::new(1.0, Color32::from_white_alpha(10)), egui::StrokeKind::Outside);
 }

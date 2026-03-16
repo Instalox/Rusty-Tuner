@@ -63,6 +63,34 @@ pub struct TunerApp {
     // Input device
     input_devices: Vec<String>,
     selected_device: usize, // 0 = "Default", 1+ = named devices
+
+    // Background Image
+    bg_texture: Option<egui::TextureHandle>,
+
+    // Zone calibration (fractions of pedal image)
+    show_calibration: bool,
+    zone_screen: [f32; 4],     // [left, top, right, bottom]
+    zone_strip: [f32; 4],
+    zone_controls: [f32; 4],
+    zone_foot_center: [f32; 2], // [x, y]
+    zone_foot_r: f32,
+    zone_leds_y: f32,
+    zone_knob_left: [f32; 2],  // [x, y]
+    zone_knob_right: [f32; 2],
+    zone_branding_y: f32,
+    zone_labels_y: f32,
+    calibration_drag: Option<(&'static str, usize)>, // which handle is being dragged
+}
+
+fn load_image_from_path(path: &std::path::Path) -> Result<egui::ColorImage, image::ImageError> {
+    let image = image::open(path)?;
+    let size = [image.width() as _, image.height() as _];
+    let image_buffer = image.to_rgba8();
+    let pixels = image_buffer.as_flat_samples();
+    Ok(egui::ColorImage::from_rgba_unmultiplied(
+        size,
+        pixels.as_slice(),
+    ))
 }
 
 fn draw_3d_button(
@@ -166,6 +194,20 @@ impl TunerApp {
 
             input_devices,
             selected_device: 0,
+            bg_texture: None,
+
+            show_calibration: false,
+            zone_screen: [0.166, 0.292, 0.836, 0.504],
+            zone_strip: [0.145, 0.529, 0.855, 0.603],
+            zone_controls: [0.145, 0.625, 0.855, 0.655],
+            zone_foot_center: [0.506, 0.759],
+            zone_foot_r: 0.09,
+            zone_leds_y: 0.730,
+            zone_knob_left: [0.291, 0.197],
+            zone_knob_right: [0.709, 0.197],
+            zone_branding_y: 0.038,
+            zone_labels_y: 0.256,
+            calibration_drag: None,
         }
     }
 }
@@ -218,6 +260,11 @@ impl eframe::App for TunerApp {
             // W: toggle waveform
             if i.key_pressed(Key::W) {
                 self.show_waveform = !self.show_waveform;
+            }
+
+            // D: toggle calibration overlay
+            if i.key_pressed(Key::D) {
+                self.show_calibration = !self.show_calibration;
             }
         });
 
@@ -319,716 +366,484 @@ impl eframe::App for TunerApp {
             }
         }
 
+        // Load texture if not already loaded
+        let bg_texture = self.bg_texture.get_or_insert_with(|| {
+            let path = std::path::PathBuf::from("images/blank-pedal.png");
+            if let Ok(color_image) = load_image_from_path(&path) {
+                ctx.load_texture(
+                    "blank-pedal",
+                    color_image,
+                    egui::TextureOptions::LINEAR,
+                )
+            } else {
+                // Fallback texture if loading fails
+                ctx.load_texture(
+                    "fallback",
+                    egui::ColorImage::example(),
+                    egui::TextureOptions::default(),
+                )
+            }
+        });
+
         // ---- UI ----
         let frame = egui::Frame::default()
-            .fill(egui::Color32::from_rgb(32, 34, 38)) // Metal pedal color
-            .inner_margin(egui::Margin::same(16));
+            .fill(egui::Color32::from_rgb(22, 24, 28))
+            .inner_margin(egui::Margin::same(0));
 
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
-            // Draw pedal edge and screws
-            let rect = ui.max_rect();
-            let painter = ui.painter();
-            
-            // Subtle edge highlight for 3D pedal chassis
-            painter.rect_stroke(rect, 16.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 55, 60)), egui::StrokeKind::Inside);
-            painter.rect_stroke(rect.shrink(1.0), 15.0, egui::Stroke::new(3.0, egui::Color32::from_rgb(10, 10, 12)), egui::StrokeKind::Inside);
-            painter.rect_stroke(rect.shrink(4.0), 12.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(20, 22, 24)), egui::StrokeKind::Inside);
+            let panel = ui.max_rect();
+            let time = ctx.input(|i| i.time);
 
-            // Screws in corners
-            let screw_radius = 5.0;
-            let inset = 24.0;
-            let corners = [
-                rect.left_top() + egui::vec2(inset, inset),
-                rect.right_top() + egui::vec2(-inset, inset),
-                rect.left_bottom() + egui::vec2(inset, -inset),
-                rect.right_bottom() + egui::vec2(-inset, -inset),
-            ];
-            for &pos in &corners {
-                painter.circle_filled(pos + egui::vec2(1.0, 1.0), screw_radius, egui::Color32::from_black_alpha(180));
-                painter.circle_filled(pos, screw_radius, egui::Color32::from_rgb(100, 105, 110));
-                painter.circle_stroke(pos, screw_radius, egui::Stroke::new(0.5, egui::Color32::from_rgb(150, 155, 160)));
-                painter.line_segment(
-                    [pos + egui::vec2(-3.0, -3.0), pos + egui::vec2(3.0, 3.0)],
-                    egui::Stroke::new(1.5, egui::Color32::from_rgb(30, 30, 30))
+            // Maintain 2:3 aspect ratio, centered in panel
+            let pedal_aspect = 1.5;
+            let (pw, ph) = if panel.width() * pedal_aspect <= panel.height() {
+                (panel.width(), panel.width() * pedal_aspect)
+            } else {
+                (panel.height() / pedal_aspect, panel.height())
+            };
+            let pedal_rect = egui::Rect::from_center_size(
+                panel.center(),
+                egui::Vec2::new(pw, ph),
+            );
+
+            // Draw pedal background image
+            ui.painter().image(
+                bg_texture.id(),
+                pedal_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+
+            // Helper: convert pedal-relative fractions to screen coords
+            let px = |frac_x: f32| pedal_rect.left() + frac_x * pw;
+            let py = |frac_y: f32| pedal_rect.top() + frac_y * ph;
+
+            // ============================================================
+            // CALIBRATION MODE (press D to toggle)
+            // Draws zone rectangles with draggable handles
+            // ============================================================
+            if self.show_calibration {
+                // Screen zone
+                let sr = egui::Rect::from_min_max(
+                    egui::Pos2::new(px(self.zone_screen[0]), py(self.zone_screen[1])),
+                    egui::Pos2::new(px(self.zone_screen[2]), py(self.zone_screen[3])),
+                );
+                ui.painter().rect_stroke(sr, 0.0, egui::Stroke::new(2.0, egui::Color32::RED), egui::StrokeKind::Outside);
+                ui.painter().text(sr.left_top() + egui::vec2(4.0, 4.0), egui::Align2::LEFT_TOP, "SCREEN", egui::FontId::proportional(12.0), egui::Color32::RED);
+
+                // Strip zone
+                let st = egui::Rect::from_min_max(
+                    egui::Pos2::new(px(self.zone_strip[0]), py(self.zone_strip[1])),
+                    egui::Pos2::new(px(self.zone_strip[2]), py(self.zone_strip[3])),
+                );
+                ui.painter().rect_stroke(st, 0.0, egui::Stroke::new(2.0, egui::Color32::GREEN), egui::StrokeKind::Outside);
+                ui.painter().text(st.left_top() + egui::vec2(4.0, 4.0), egui::Align2::LEFT_TOP, "STRIP", egui::FontId::proportional(12.0), egui::Color32::GREEN);
+
+                // Controls zone
+                let ct = egui::Rect::from_min_max(
+                    egui::Pos2::new(px(self.zone_controls[0]), py(self.zone_controls[1])),
+                    egui::Pos2::new(px(self.zone_controls[2]), py(self.zone_controls[3])),
+                );
+                ui.painter().rect_stroke(ct, 0.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 200, 255)), egui::StrokeKind::Outside);
+                ui.painter().text(ct.left_top() + egui::vec2(4.0, 4.0), egui::Align2::LEFT_TOP, "CONTROLS", egui::FontId::proportional(12.0), egui::Color32::from_rgb(0, 200, 255));
+
+                // Footswitch
+                let fc = egui::Pos2::new(px(self.zone_foot_center[0]), py(self.zone_foot_center[1]));
+                let fr = pw * self.zone_foot_r;
+                ui.painter().circle_stroke(fc, fr, egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 0, 255)));
+                ui.painter().text(fc + egui::vec2(0.0, -fr - 8.0), egui::Align2::CENTER_BOTTOM, "FOOT", egui::FontId::proportional(12.0), egui::Color32::from_rgb(255, 0, 255));
+
+                // LEDs Y line
+                let ly = py(self.zone_leds_y);
+                ui.painter().line_segment(
+                    [egui::Pos2::new(px(0.3), ly), egui::Pos2::new(px(0.7), ly)],
+                    egui::Stroke::new(2.0, egui::Color32::YELLOW),
+                );
+                ui.painter().text(egui::Pos2::new(px(0.7) + 4.0, ly), egui::Align2::LEFT_CENTER, "LEDs", egui::FontId::proportional(12.0), egui::Color32::YELLOW);
+
+                // Knobs
+                let knob_r_vis = pw * 0.06;
+                let lk = egui::Pos2::new(px(self.zone_knob_left[0]), py(self.zone_knob_left[1]));
+                let rk = egui::Pos2::new(px(self.zone_knob_right[0]), py(self.zone_knob_right[1]));
+                ui.painter().circle_stroke(lk, knob_r_vis, egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 128, 0)));
+                ui.painter().circle_stroke(rk, knob_r_vis, egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 128, 0)));
+
+                // Branding Y line
+                let by = py(self.zone_branding_y);
+                ui.painter().line_segment(
+                    [egui::Pos2::new(px(0.3), by), egui::Pos2::new(px(0.7), by)],
+                    egui::Stroke::new(1.0, egui::Color32::from_gray(200)),
+                );
+
+                // Labels Y line
+                let lby = py(self.zone_labels_y);
+                ui.painter().line_segment(
+                    [egui::Pos2::new(px(0.2), lby), egui::Pos2::new(px(0.8), lby)],
+                    egui::Stroke::new(1.0, egui::Color32::from_gray(150)),
+                );
+
+                // Draggable handles for screen rect corners
+                let handle_size = 8.0;
+                let handles: Vec<(&str, usize, egui::Pos2)> = vec![
+                    ("screen", 0, egui::Pos2::new(px(self.zone_screen[0]), py((self.zone_screen[1] + self.zone_screen[3]) / 2.0))), // left
+                    ("screen", 1, egui::Pos2::new(px((self.zone_screen[0] + self.zone_screen[2]) / 2.0), py(self.zone_screen[1]))), // top
+                    ("screen", 2, egui::Pos2::new(px(self.zone_screen[2]), py((self.zone_screen[1] + self.zone_screen[3]) / 2.0))), // right
+                    ("screen", 3, egui::Pos2::new(px((self.zone_screen[0] + self.zone_screen[2]) / 2.0), py(self.zone_screen[3]))), // bottom
+                    ("strip", 1, egui::Pos2::new(px((self.zone_strip[0] + self.zone_strip[2]) / 2.0), py(self.zone_strip[1]))), // top
+                    ("strip", 3, egui::Pos2::new(px((self.zone_strip[0] + self.zone_strip[2]) / 2.0), py(self.zone_strip[3]))), // bottom
+                    ("controls", 1, egui::Pos2::new(px((self.zone_controls[0] + self.zone_controls[2]) / 2.0), py(self.zone_controls[1]))),
+                    ("controls", 3, egui::Pos2::new(px((self.zone_controls[0] + self.zone_controls[2]) / 2.0), py(self.zone_controls[3]))),
+                    ("foot", 1, egui::Pos2::new(px(self.zone_foot_center[0]), py(self.zone_foot_center[1]))), // center
+                    ("leds", 1, egui::Pos2::new(px(0.5), py(self.zone_leds_y))),
+                    ("knob_l", 0, egui::Pos2::new(px(self.zone_knob_left[0]), py(self.zone_knob_left[1]))),
+                    ("knob_r", 0, egui::Pos2::new(px(self.zone_knob_right[0]), py(self.zone_knob_right[1]))),
+                    ("branding", 1, egui::Pos2::new(px(0.5), py(self.zone_branding_y))),
+                    ("labels", 1, egui::Pos2::new(px(0.5), py(self.zone_labels_y))),
+                ];
+
+                for (zone_name, idx, pos) in &handles {
+                    let handle_rect = egui::Rect::from_center_size(*pos, egui::Vec2::splat(handle_size * 2.0));
+                    let resp = ui.interact(handle_rect, ui.id().with((*zone_name, *idx, "handle")), egui::Sense::click_and_drag());
+                    let color = if resp.dragged() || resp.hovered() { egui::Color32::WHITE } else { egui::Color32::from_gray(200) };
+                    ui.painter().rect_filled(
+                        egui::Rect::from_center_size(*pos, egui::Vec2::splat(handle_size)),
+                        2.0, color,
+                    );
+
+                    if resp.dragged() {
+                        let delta = resp.drag_delta();
+                        let dx = delta.x / pw;
+                        let dy = delta.y / ph;
+                        match (*zone_name, *idx) {
+                            ("screen", 0) => self.zone_screen[0] = (self.zone_screen[0] + dx).clamp(0.0, 0.5),
+                            ("screen", 1) => self.zone_screen[1] = (self.zone_screen[1] + dy).clamp(0.0, 0.5),
+                            ("screen", 2) => self.zone_screen[2] = (self.zone_screen[2] + dx).clamp(0.5, 1.0),
+                            ("screen", 3) => self.zone_screen[3] = (self.zone_screen[3] + dy).clamp(0.2, 0.8),
+                            ("strip", 1) => self.zone_strip[1] = (self.zone_strip[1] + dy).clamp(0.3, 0.8),
+                            ("strip", 3) => self.zone_strip[3] = (self.zone_strip[3] + dy).clamp(0.4, 0.9),
+                            ("controls", 1) => self.zone_controls[1] = (self.zone_controls[1] + dy).clamp(0.4, 0.9),
+                            ("controls", 3) => self.zone_controls[3] = (self.zone_controls[3] + dy).clamp(0.4, 0.9),
+                            ("foot", 1) => {
+                                self.zone_foot_center[0] = (self.zone_foot_center[0] + dx).clamp(0.2, 0.8);
+                                self.zone_foot_center[1] = (self.zone_foot_center[1] + dy).clamp(0.5, 0.95);
+                            }
+                            ("leds", _) => self.zone_leds_y = (self.zone_leds_y + dy).clamp(0.4, 0.9),
+                            ("knob_l", _) => {
+                                self.zone_knob_left[0] = (self.zone_knob_left[0] + dx).clamp(0.1, 0.5);
+                                self.zone_knob_left[1] = (self.zone_knob_left[1] + dy).clamp(0.0, 0.3);
+                            }
+                            ("knob_r", _) => {
+                                self.zone_knob_right[0] = (self.zone_knob_right[0] + dx).clamp(0.5, 0.9);
+                                self.zone_knob_right[1] = (self.zone_knob_right[1] + dy).clamp(0.0, 0.3);
+                            }
+                            ("branding", _) => self.zone_branding_y = (self.zone_branding_y + dy).clamp(0.0, 0.2),
+                            ("labels", _) => self.zone_labels_y = (self.zone_labels_y + dy).clamp(0.05, 0.3),
+                            _ => {}
+                        }
+                    }
+                }
+
+                // Print current values for copy-paste
+                ui.painter().text(
+                    egui::Pos2::new(pedal_rect.left() + 4.0, pedal_rect.bottom() - 60.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    format!(
+                        "screen: [{:.3}, {:.3}, {:.3}, {:.3}]\nstrip: [{:.3}, {:.3}, {:.3}, {:.3}]\ncontrols: [{:.3}, {:.3}, {:.3}, {:.3}]\nfoot: [{:.3}, {:.3}] leds: {:.3}\nknob_l: [{:.3}, {:.3}] knob_r: [{:.3}, {:.3}]\nbranding: {:.3} labels: {:.3}",
+                        self.zone_screen[0], self.zone_screen[1], self.zone_screen[2], self.zone_screen[3],
+                        self.zone_strip[0], self.zone_strip[1], self.zone_strip[2], self.zone_strip[3],
+                        self.zone_controls[0], self.zone_controls[1], self.zone_controls[2], self.zone_controls[3],
+                        self.zone_foot_center[0], self.zone_foot_center[1], self.zone_leds_y,
+                        self.zone_knob_left[0], self.zone_knob_left[1], self.zone_knob_right[0], self.zone_knob_right[1],
+                        self.zone_branding_y, self.zone_labels_y,
+                    ),
+                    egui::FontId::monospace(10.0),
+                    egui::Color32::WHITE,
                 );
             }
 
-            ui.vertical_centered(|ui| {
-                ui.add_space(6.0);
+            // ============================================================
+            // ZONE: Knob labels + interactive knobs
+            // ============================================================
 
-                // Error banner
+            // Branding
+            ui.painter().text(
+                egui::Pos2::new(px(0.50), py(self.zone_branding_y)),
+                egui::Align2::CENTER_CENTER,
+                "RustyTuner",
+                egui::FontId::proportional(pw * 0.05),
+                egui::Color32::from_rgba_unmultiplied(200, 190, 170, 180),
+            );
+
+            // Tuning name + A4 frequency labels
+            let tuning_name = self.tunings[self.selected_tuning].name;
+            ui.painter().text(
+                egui::Pos2::new(px(0.38), py(self.zone_labels_y)),
+                egui::Align2::CENTER_CENTER,
+                tuning_name,
+                egui::FontId::proportional(pw * 0.030),
+                egui::Color32::from_gray(170),
+            );
+            ui.painter().text(
+                egui::Pos2::new(px(0.62), py(self.zone_labels_y)),
+                egui::Align2::CENTER_CENTER,
+                format!("{:.1} Hz", self.a4_freq),
+                egui::FontId::proportional(pw * 0.030),
+                egui::Color32::from_gray(170),
+            );
+
+            // Interactive knobs (disabled during calibration so handles can be dragged)
+            let knob_r = pw * 0.07;
+            let left_knob_center = egui::Pos2::new(px(self.zone_knob_left[0]), py(self.zone_knob_left[1]));
+            let left_knob_rect = egui::Rect::from_center_size(left_knob_center, egui::Vec2::splat(knob_r * 2.0));
+            let knob_sense = if self.show_calibration { egui::Sense::hover() } else { egui::Sense::click_and_drag() };
+            let left_knob_resp = ui.interact(left_knob_rect, ui.id().with("knob_tuning"), knob_sense);
+            if left_knob_resp.dragged() {
+                let dy = left_knob_resp.drag_delta().y;
+                if dy < -4.0 {
+                    self.selected_tuning = (self.selected_tuning + 1).min(self.tunings.len() - 1);
+                    self.selected_string = None;
+                } else if dy > 4.0 {
+                    self.selected_tuning = self.selected_tuning.saturating_sub(1);
+                    self.selected_string = None;
+                }
+            }
+            if left_knob_resp.hovered() {
+                left_knob_resp.clone().on_hover_text("Drag to change tuning");
+            }
+            let scroll_tuning = ctx.input(|i| if left_knob_resp.hovered() { i.raw_scroll_delta.y } else { 0.0 });
+            if scroll_tuning > 1.0 { self.selected_tuning = self.selected_tuning.saturating_sub(1); self.selected_string = None; }
+            else if scroll_tuning < -1.0 { self.selected_tuning = (self.selected_tuning + 1).min(self.tunings.len() - 1); self.selected_string = None; }
+
+            let right_knob_center = egui::Pos2::new(px(self.zone_knob_right[0]), py(self.zone_knob_right[1]));
+            let right_knob_rect = egui::Rect::from_center_size(right_knob_center, egui::Vec2::splat(knob_r * 2.0));
+            let right_knob_resp = ui.interact(right_knob_rect, ui.id().with("knob_a4"), knob_sense);
+            if right_knob_resp.dragged() {
+                self.a4_freq = (self.a4_freq - right_knob_resp.drag_delta().y as f64 * 0.3).clamp(420.0, 460.0);
+            }
+            if right_knob_resp.hovered() {
+                right_knob_resp.clone().on_hover_text(format!("A4: {:.1} Hz — drag to adjust", self.a4_freq));
+            }
+            let scroll_a4 = ctx.input(|i| if right_knob_resp.hovered() { i.raw_scroll_delta.y } else { 0.0 });
+            if scroll_a4.abs() > 0.1 { self.a4_freq = (self.a4_freq + scroll_a4 as f64 * 0.1).clamp(420.0, 460.0); }
+
+            // Knob indicators
+            let indicator_r = knob_r * 0.50;
+            let tuning_frac = self.selected_tuning as f32 / (self.tunings.len() - 1).max(1) as f32;
+            let tuning_angle = PI * 0.75 + tuning_frac * PI * 1.5;
+            let tip = egui::Pos2::new(left_knob_center.x + indicator_r * tuning_angle.cos(), left_knob_center.y + indicator_r * tuning_angle.sin());
+            ui.painter().line_segment([left_knob_center, tip], egui::Stroke::new(2.0, egui::Color32::from_gray(200)));
+
+            let a4_frac = ((self.a4_freq - 420.0) / 40.0) as f32;
+            let a4_angle = PI * 0.75 + a4_frac * PI * 1.5;
+            let a4_tip = egui::Pos2::new(right_knob_center.x + indicator_r * a4_angle.cos(), right_knob_center.y + indicator_r * a4_angle.sin());
+            ui.painter().line_segment([right_knob_center, a4_tip], egui::Stroke::new(2.0, egui::Color32::from_gray(200)));
+
+            // ============================================================
+            // ZONE: Screen — uses self.zone_screen
+            // ============================================================
+            let screen_rect = egui::Rect::from_min_max(
+                egui::Pos2::new(px(self.zone_screen[0]), py(self.zone_screen[1])),
+                egui::Pos2::new(px(self.zone_screen[2]), py(self.zone_screen[3])),
+            );
+            ui.painter().rect_filled(screen_rect, 4.0, egui::Color32::from_rgba_unmultiplied(4, 6, 10, 240));
+
+            let mut screen_ui = ui.new_child(egui::UiBuilder::new().max_rect(screen_rect));
+            screen_ui.set_clip_rect(screen_rect);
+            screen_ui.vertical_centered(|ui| {
+                let sh = screen_rect.height();
+                let sw = screen_rect.width();
+                let s = sw.min(sh * 1.5); // scale factor based on smaller dimension
+
+                ui.add_space(2.0);
                 if let Some(ref err) = self.audio_error {
                     ui.colored_label(egui::Color32::from_rgb(230, 60, 60), err);
-                    ui.add_space(4.0);
                 }
 
-                // Header bar — styled settings row
-                let header_frame = egui::Frame::NONE
-                    .fill(egui::Color32::from_rgb(22, 24, 28))
-                    .corner_radius(6.0)
-                    .shadow(egui::epaint::Shadow {
-                        offset: [0, 4],
-                        blur: 8,
-                        spread: 0,
-                        color: egui::Color32::from_black_alpha(150),
-                    })
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(15, 16, 18)))
-                    .inner_margin(egui::Margin::symmetric(10, 7));
-
-                header_frame.show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-
-                        // Tuning label
-                        ui.label(
-                            egui::RichText::new("TUNING")
-                                .size(9.0)
-                                .color(egui::Color32::from_gray(80)),
-                        );
-
-                        egui::ComboBox::from_id_salt("tuning_select")
-                            .selected_text(
-                                egui::RichText::new(self.tunings[self.selected_tuning].name)
-                                    .size(12.0),
-                            )
-                            .width(125.0)
-                            .show_ui(ui, |ui| {
-                                for (i, t) in self.tunings.iter().enumerate() {
-                                    let r = ui.selectable_value(&mut self.selected_tuning, i, t.name);
-                                    if r.changed() {
-                                        self.selected_string = None;
-                                    }
-                                }
-                            });
-
-                        ui.add_space(4.0);
-
-                        // Subtle vertical divider
-                        let (div_rect, _) = ui.allocate_exact_size(
-                            egui::Vec2::new(1.0, 18.0),
-                            egui::Sense::hover(),
-                        );
-                        ui.painter().line_segment(
-                            [div_rect.left_top(), div_rect.left_bottom()],
-                            egui::Stroke::new(1.0, egui::Color32::from_gray(45)),
-                        );
-
-                        ui.add_space(4.0);
-
-                        ui.label(
-                            egui::RichText::new("A4")
-                                .size(10.0)
-                                .color(egui::Color32::from_gray(90)),
-                        );
-                        ui.add(
-                            egui::Slider::new(&mut self.a4_freq, 420.0..=460.0)
-                                .suffix(" Hz")
-                                .fixed_decimals(1)
-                                .text(""),
-                        );
-                    });
-                });
-
-                // Input device selector
-                if !self.input_devices.is_empty() {
-                    ui.add_space(8.0);
-                    let device_frame = egui::Frame::NONE
-                        .fill(egui::Color32::from_rgb(22, 24, 28))
-                        .corner_radius(6.0)
-                        .shadow(egui::epaint::Shadow {
-                            offset: [0, 4],
-                            blur: 8,
-                            spread: 0,
-                            color: egui::Color32::from_black_alpha(150),
-                        })
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(15, 16, 18)))
-                        .inner_margin(egui::Margin::symmetric(10, 5));
-
-                    device_frame.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 6.0;
-
-                            ui.label(
-                                egui::RichText::new("INPUT")
-                                    .size(9.0)
-                                    .color(egui::Color32::from_gray(80)),
-                            );
-
-                            let current_name = if self.selected_device == 0 {
-                                "Default".to_string()
-                            } else {
-                                self.input_devices
-                                    .get(self.selected_device - 1)
-                                    .cloned()
-                                    .unwrap_or("Default".to_string())
-                            };
-
-                            let mut changed = false;
-                            egui::ComboBox::from_id_salt("input_device")
-                                .selected_text(
-                                    egui::RichText::new(&current_name).size(12.0),
-                                )
-                                .width(ui.available_width().min(280.0))
-                                .show_ui(ui, |ui| {
-                                    if ui
-                                        .selectable_value(&mut self.selected_device, 0, "Default")
-                                        .changed()
-                                    {
-                                        changed = true;
-                                    }
-                                    for (i, name) in self.input_devices.iter().enumerate() {
-                                        if ui
-                                            .selectable_value(
-                                                &mut self.selected_device,
-                                                i + 1,
-                                                name,
-                                            )
-                                            .changed()
-                                        {
-                                            changed = true;
-                                        }
-                                    }
-                                });
-
-                            if changed {
-                                let device_name = if self.selected_device == 0 {
-                                    None
-                                } else {
-                                    self.input_devices.get(self.selected_device - 1).map(|s| s.as_str())
-                                };
-                                match AudioEngine::start(
-                                    Arc::clone(&self.shared_buffer),
-                                    device_name,
-                                ) {
-                                    Ok(engine) => {
-                                        self._audio_engine = Some(engine);
-                                        self.audio_error = None;
-                                    }
-                                    Err(e) => {
-                                        self._audio_engine = None;
-                                        self.audio_error = Some(format!("Audio error: {e}"));
-                                    }
-                                }
-                            }
-                        });
-                    });
-                }
-
-                ui.add_space(8.0);
-
-                // ---- Note display ----
                 let active = self.clarity > 0.01;
 
                 if active {
                     let abs_cents = self.smoothed_cents.abs();
                     let note_color = gauge::cents_color(abs_cents as f32);
-
-                    // Note name (big) + octave (small subscript)
                     ui.horizontal(|ui| {
-                        ui.add_space((ui.available_width() - 120.0) / 2.0); // center roughly
-                        ui.label(
-                            egui::RichText::new(&self.display_note)
-                                .size(80.0)
-                                .color(note_color)
-                                .strong(),
-                        );
+                        ui.add_space((ui.available_width() - s * 0.35) / 2.0);
+                        ui.label(egui::RichText::new(&self.display_note).size(s * 0.14).color(note_color).strong());
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::BOTTOM), |ui| {
-                            ui.add_space(0.0);
-                            ui.label(
-                                egui::RichText::new(format!("{}", self.display_octave))
-                                    .size(32.0)
-                                    .color(note_color.gamma_multiply(0.7)),
-                            );
+                            ui.label(egui::RichText::new(format!("{}", self.display_octave)).size(s * 0.06).color(note_color.gamma_multiply(0.7)));
                         });
                     });
-
-                    // Frequency + cents
-                    ui.label(
-                        egui::RichText::new(format!("{:.1} Hz", self.detected_freq))
-                            .size(16.0)
-                            .color(egui::Color32::from_gray(140)),
-                    );
-
-                    // Cents with direction indicator
-                    let cents_text = if abs_cents < 1.0 {
-                        "IN TUNE".to_string()
-                    } else {
+                    ui.label(egui::RichText::new(format!("{:.1} Hz", self.detected_freq)).size(s * 0.03).color(egui::Color32::from_gray(140)));
+                    let cents_text = if abs_cents < 1.0 { "IN TUNE".to_string() } else {
                         let arrow = if self.smoothed_cents > 0.0 { "+" } else { "" };
                         format!("{arrow}{:.1} cents", self.smoothed_cents)
                     };
-                    ui.label(
-                        egui::RichText::new(cents_text)
-                            .size(14.0)
-                            .color(if abs_cents < 3.0 {
-                                egui::Color32::from_rgb(0, 220, 100)
-                            } else {
-                                note_color.gamma_multiply(0.9)
-                            }),
-                    );
+                    ui.label(egui::RichText::new(cents_text).size(s * 0.025).color(
+                        if abs_cents < 3.0 { egui::Color32::from_rgb(0, 220, 100) } else { note_color.gamma_multiply(0.9) }
+                    ));
                 } else {
-                    // Idle state
-                    ui.label(
-                        egui::RichText::new("—")
-                            .size(80.0)
-                            .color(egui::Color32::from_gray(55))
-                            .strong(),
-                    );
-                    ui.label(
-                        egui::RichText::new("Play a note")
-                            .size(14.0)
-                            .color(egui::Color32::from_gray(70)),
-                    );
-                    ui.add_space(17.0); // keep layout stable
+                    ui.label(egui::RichText::new("—").size(s * 0.14).color(egui::Color32::from_gray(40)).strong());
+                    ui.label(egui::RichText::new("Play a note").size(s * 0.03).color(egui::Color32::from_gray(55)));
                 }
 
-                ui.add_space(8.0);
-
-                // Gauge
-                let time = ctx.input(|i| i.time);
+                ui.add_space(1.0);
                 gauge::draw_gauge(ui, self.smoothed_cents, self.clarity, self.needle_angle, time);
-
-                ui.add_space(6.0);
-
-                // Strobe tuner
+                ui.add_space(1.0);
                 gauge::draw_strobe(ui, self.smoothed_cents, self.clarity, time);
-
-                ui.add_space(8.0);
-
-                // String buttons — custom painted
-                let tuning = self.tunings[self.selected_tuning].clone();
-                let num_strings = tuning.strings.len();
-                let total_width = ui.available_width().min(370.0);
-                let auto_width = 44.0;
-                let sep_width = 12.0;
-                let btn_gap = 5.0;
-                let string_area = total_width - auto_width - sep_width - btn_gap * (num_strings as f32 - 1.0);
-                let string_btn_width = (string_area / num_strings as f32).max(40.0);
-                let btn_height = 42.0;
-
-                let (row_rect, _) = ui.allocate_exact_size(
-                    egui::Vec2::new(total_width, btn_height),
-                    egui::Sense::hover(),
-                );
-
-                // Center the row
-                let row_left = row_rect.center().x - total_width / 2.0;
-                let mut x = row_left;
-
-                // Auto button
-                let auto_active = self.selected_string.is_none();
-                let auto_rect = egui::Rect::from_min_size(
-                    egui::Pos2::new(x, row_rect.top()),
-                    egui::Vec2::new(auto_width, btn_height),
-                );
-                let auto_response = ui.interact(auto_rect, ui.id().with("auto_btn"), egui::Sense::click());
-                let auto_hovered = auto_response.hovered();
-
-                let auto_fill = if auto_active {
-                    egui::Color32::from_rgb(60, 80, 100)
-                } else if auto_hovered {
-                    egui::Color32::from_rgb(45, 48, 55)
-                } else {
-                    egui::Color32::from_rgb(35, 38, 45)
-                };
-
-                let is_pressed = auto_response.is_pointer_button_down_on();
-                let actual_auto_rect = draw_3d_button(ui.painter(), auto_rect, auto_fill, is_pressed, 6.0);
-
-                if auto_active {
-                    // Small LED indicator
-                    ui.painter().circle_filled(
-                        actual_auto_rect.center() + egui::vec2(0.0, 8.0),
-                        2.0,
-                        egui::Color32::from_rgb(100, 200, 255),
-                    );
-                }
-
-                ui.painter().text(
-                    actual_auto_rect.center() - egui::vec2(0.0, if auto_active { 4.0 } else { 0.0 }),
-                    egui::Align2::CENTER_CENTER,
-                    "AUTO",
-                    egui::FontId::proportional(11.0),
-                    if auto_active {
-                        egui::Color32::from_rgb(200, 230, 255)
-                    } else {
-                        egui::Color32::from_gray(140)
-                    },
-                );
-
-                if auto_response.clicked() {
-                    self.selected_string = None;
-                }
-
-                x += auto_width + sep_width;
-
-                // String buttons
-                for (i, s) in tuning.strings.iter().enumerate() {
-                    let is_selected = self.selected_string == Some(i);
-                    let is_playing = self.playing_string == Some(i);
-                    let is_auto_detected = self.selected_string.is_none()
-                        && self.auto_string_idx == Some(i)
-                        && self.clarity > 0.01;
-
-                    let btn_rect = egui::Rect::from_min_size(
-                        egui::Pos2::new(x, row_rect.top()),
-                        egui::Vec2::new(string_btn_width, btn_height),
-                    );
-
-                    // Split into note area (top) and play area (bottom strip)
-                    let note_rect = egui::Rect::from_min_max(
-                        btn_rect.min,
-                        egui::Pos2::new(btn_rect.right(), btn_rect.bottom() - 13.0),
-                    );
-                    let play_rect = egui::Rect::from_min_max(
-                        egui::Pos2::new(btn_rect.left(), btn_rect.bottom() - 13.0),
-                        btn_rect.max,
-                    );
-
-                    let note_response = ui.interact(note_rect, ui.id().with(("string", i)), egui::Sense::click());
-                    let play_response = ui.interact(play_rect, ui.id().with(("play", i)), egui::Sense::click());
-                    let hovered = note_response.hovered() || play_response.hovered();
-
-                    let target_hz = s.frequency(self.a4_freq);
-
-                    // Background fill
-                    let fill = if is_selected {
-                        egui::Color32::from_rgb(60, 80, 100)
-                    } else if is_auto_detected {
-                        let c = gauge::cents_color(self.auto_string_cents.abs() as f32);
-                        egui::Color32::from_rgb(
-                            (c.r() as f32 * 0.25) as u8 + 30,
-                            (c.g() as f32 * 0.25) as u8 + 32,
-                            (c.b() as f32 * 0.25) as u8 + 36,
-                        )
-                    } else if hovered {
-                        egui::Color32::from_rgb(45, 48, 55)
-                    } else {
-                        egui::Color32::from_rgb(35, 38, 45)
-                    };
-
-                    let is_pressed = note_response.is_pointer_button_down_on() || play_response.is_pointer_button_down_on();
-                    let actual_btn_rect = draw_3d_button(ui.painter(), btn_rect, fill, is_pressed, 6.0);
-
-                    // Recompute note/play rects based on actual_btn_rect (handles pressed offset)
-                    let actual_note_rect = egui::Rect::from_min_max(
-                        actual_btn_rect.min,
-                        egui::Pos2::new(actual_btn_rect.right(), actual_btn_rect.bottom() - 13.0),
-                    );
-                    let actual_play_rect = egui::Rect::from_min_max(
-                        egui::Pos2::new(actual_btn_rect.left(), actual_btn_rect.bottom() - 13.0),
-                        actual_btn_rect.max,
-                    );
-
-                    // Note name
-                    let note_color = if is_selected {
-                        egui::Color32::WHITE
-                    } else if is_auto_detected {
-                        gauge::cents_color(self.auto_string_cents.abs() as f32)
-                    } else {
-                        egui::Color32::from_gray(170)
-                    };
-
-                    ui.painter().text(
-                        egui::Pos2::new(actual_note_rect.center().x, actual_note_rect.center().y - 6.0),
-                        egui::Align2::CENTER_CENTER,
-                        s.name,
-                        egui::FontId::proportional(15.0),
-                        note_color,
-                    );
-
-                    // Divider line between note and play area
-                    ui.painter().line_segment(
-                        [
-                            egui::Pos2::new(actual_btn_rect.left() + 4.0, actual_play_rect.top()),
-                            egui::Pos2::new(actual_btn_rect.right() - 4.0, actual_play_rect.top()),
-                        ],
-                        egui::Stroke::new(0.5, egui::Color32::from_black_alpha(100)),
-                    );
-
-                    // Play indicator
-                    let play_color = if is_playing {
-                        egui::Color32::from_rgb(0, 255, 120)
-                    } else if play_response.hovered() {
-                        egui::Color32::from_gray(150)
-                    } else {
-                        egui::Color32::from_gray(90)
-                    };
-
-                    let play_icon = if is_playing { "\u{25A0}" } else { "\u{25B6}" };
-                    ui.painter().text(
-                        egui::Pos2::new(actual_play_rect.center().x, actual_play_rect.center().y + 0.5),
-                        egui::Align2::CENTER_CENTER,
-                        play_icon,
-                        egui::FontId::proportional(8.0),
-                        play_color,
-                    );
-                    
-                    // Small LED for selection/auto right below the note name
-                    if is_selected || is_auto_detected {
-                        let led_color = if is_selected {
-                            egui::Color32::from_rgb(100, 200, 255)
-                        } else {
-                            gauge::cents_color(self.auto_string_cents.abs() as f32)
-                        };
-                        ui.painter().circle_filled(
-                            egui::Pos2::new(actual_note_rect.center().x, actual_note_rect.bottom() - 3.5),
-                            2.0,
-                            led_color,
-                        );
-                    }
-
-                    // Hover tooltip
-                    if note_response.hovered() {
-                        note_response.clone().on_hover_text(format!("{} — {:.1} Hz", s.name, target_hz));
-                    }
-
-                    // Click handling
-                    if note_response.clicked() {
-                        self.selected_string = Some(i);
-                    }
-
-                    if play_response.clicked() {
-                        if is_playing {
-                            self.tone_state.stop();
-                            self.playing_string = None;
-                        } else {
-                            self.tone_state.set_frequency(target_hz as f32);
-                            self.tone_state.set_volume(self.tone_volume);
-                            self.playing_string = Some(i);
-                        }
-                    }
-
-                    x += string_btn_width + btn_gap;
-                }
-
-                // Tone volume slider (only visible when playing)
-                if self.playing_string.is_some() {
-                    ui.add_space(8.0);
-                    let vol_width = total_width;
-                    let vol_height = 20.0;
-                    let (vol_row, _) = ui.allocate_exact_size(
-                        egui::Vec2::new(vol_width, vol_height),
-                        egui::Sense::hover(),
-                    );
-                    let vol_left = vol_row.center().x - vol_width / 2.0;
-
-                    // Volume label
-                    ui.painter().text(
-                        egui::Pos2::new(vol_left + 16.0, vol_row.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        "VOL",
-                        egui::FontId::proportional(10.0),
-                        egui::Color32::from_gray(90),
-                    );
-
-                    // Volume slider area
-                    let slider_left = vol_left + 42.0;
-                    let slider_right = vol_row.right() - 50.0;
-                    let slider_rect = egui::Rect::from_min_max(
-                        egui::Pos2::new(slider_left, vol_row.center().y - 3.0),
-                        egui::Pos2::new(slider_right, vol_row.center().y + 3.0),
-                    );
-                    let slider_response = ui.interact(
-                        egui::Rect::from_min_max(
-                            egui::Pos2::new(slider_left, vol_row.top()),
-                            egui::Pos2::new(slider_right, vol_row.bottom()),
-                        ),
-                        ui.id().with("vol_slider"),
-                        egui::Sense::click_and_drag(),
-                    );
-
-                    if slider_response.dragged() || slider_response.clicked() {
-                        if let Some(pos) = slider_response.interact_pointer_pos() {
-                            let t = ((pos.x - slider_left) / (slider_right - slider_left)).clamp(0.0, 1.0);
-                            self.tone_volume = 0.05 + t * 0.45;
-                            self.tone_state.set_volume(self.tone_volume);
-                        }
-                    }
-
-                    // Slider track
-                    ui.painter().rect_filled(slider_rect, 3.0, egui::Color32::from_gray(35));
-                    let fill_frac = (self.tone_volume - 0.05) / 0.45;
-                    let fill_rect = egui::Rect::from_min_max(
-                        slider_rect.min,
-                        egui::Pos2::new(
-                            slider_left + fill_frac * (slider_right - slider_left),
-                            slider_rect.max.y,
-                        ),
-                    );
-                    ui.painter().rect_filled(fill_rect, 3.0, egui::Color32::from_rgb(60, 90, 140));
-
-                    // Slider thumb
-                    let thumb_x = slider_left + fill_frac * (slider_right - slider_left);
-                    ui.painter().circle_filled(
-                        egui::Pos2::new(thumb_x, vol_row.center().y),
-                        5.0,
-                        egui::Color32::from_rgb(100, 150, 220),
-                    );
-
-                    // Stop button
-                    let stop_rect = egui::Rect::from_min_max(
-                        egui::Pos2::new(slider_right + 8.0, vol_row.top() + 1.0),
-                        egui::Pos2::new(vol_row.right() - 4.0, vol_row.bottom() - 1.0),
-                    );
-                    let stop_response = ui.interact(stop_rect, ui.id().with("stop_btn"), egui::Sense::click());
-                    let stop_fill = if stop_response.hovered() {
-                        egui::Color32::from_rgb(65, 35, 35)
-                    } else {
-                        egui::Color32::from_rgb(45, 30, 30)
-                    };
-                    ui.painter().rect_filled(stop_rect, 4.0, stop_fill);
-                    ui.painter().rect_stroke(stop_rect, 4.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 45, 45)), egui::StrokeKind::Outside);
-                    ui.painter().text(
-                        stop_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "STOP",
-                        egui::FontId::proportional(9.0),
-                        egui::Color32::from_rgb(200, 100, 100),
-                    );
-
-                    if stop_response.clicked() {
-                        self.tone_state.stop();
-                        self.playing_string = None;
-                    }
-                }
-
-                ui.add_space(10.0);
-
-                // Volume meter — segmented LED style with label
-                let meter_total_width = ui.available_width().min(370.0);
-                let meter_label_width = 28.0;
-                let meter_width = meter_total_width - meter_label_width;
-                let meter_height = 8.0;
-                let (meter_row, _) = ui.allocate_exact_size(
-                    egui::Vec2::new(meter_total_width, meter_height),
-                    egui::Sense::hover(),
-                );
-
-                // "IN" label
-                let meter_left = meter_row.center().x - meter_total_width / 2.0;
-                ui.painter().text(
-                    egui::Pos2::new(meter_left + 10.0, meter_row.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    "IN",
-                    egui::FontId::proportional(8.0),
-                    egui::Color32::from_gray(65),
-                );
-
-                let leds_left = meter_left + meter_label_width;
-                let num_leds: usize = 36;
-                let led_gap = 1.5;
-                let led_width = (meter_width - led_gap * (num_leds - 1) as f32) / num_leds as f32;
-
-                // Map RMS to dB-ish scale: -60dB to 0dB
-                let db = if self.rms_level > 0.0 {
-                    (20.0 * self.rms_level.log10()).clamp(-60.0, 0.0)
-                } else {
-                    -60.0
-                };
-                let level = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-                let active_leds = (level * num_leds as f32).ceil() as usize;
-
-                for led_i in 0..num_leds {
-                    let led_x = leds_left + led_i as f32 * (led_width + led_gap);
-                    let led_rect = egui::Rect::from_min_size(
-                        egui::Pos2::new(led_x, meter_row.center().y - meter_height / 2.0),
-                        egui::Vec2::new(led_width, meter_height),
-                    );
-
-                    let frac = led_i as f32 / num_leds as f32;
-                    let led_color = if frac < 0.65 {
-                        egui::Color32::from_rgb(0, 180, 80)
-                    } else if frac < 0.85 {
-                        egui::Color32::from_rgb(220, 180, 0)
-                    } else {
-                        egui::Color32::from_rgb(210, 50, 50)
-                    };
-
-                    if led_i < active_leds {
-                        ui.painter().rect_filled(led_rect, 1.5, led_color);
-                    } else {
-                        ui.painter().rect_filled(led_rect, 1.5, led_color.gamma_multiply(0.1));
-                    }
-                }
-
-                ui.add_space(10.0);
-
-                // Waveform toggle — custom painted pill button
-                let wf_width = 82.0;
-                let wf_height = 20.0;
-                let (wf_rect, _) = ui.allocate_exact_size(
-                    egui::Vec2::new(wf_width, wf_height),
-                    egui::Sense::hover(),
-                );
-                let wf_btn_rect = egui::Rect::from_center_size(wf_rect.center(), egui::Vec2::new(wf_width, wf_height));
-                let wf_response = ui.interact(wf_btn_rect, ui.id().with("wf_toggle"), egui::Sense::click());
-
-                if wf_response.clicked() {
-                    self.show_waveform = !self.show_waveform;
-                }
-
-                let wf_fill = if self.show_waveform {
-                    egui::Color32::from_rgb(30, 40, 52)
-                } else if wf_response.hovered() {
-                    egui::Color32::from_rgb(32, 35, 42)
-                } else {
-                    egui::Color32::from_rgb(26, 28, 35)
-                };
-                let wf_border = if self.show_waveform {
-                    egui::Color32::from_rgb(60, 90, 140).gamma_multiply(0.5)
-                } else {
-                    egui::Color32::from_gray(40)
-                };
-                let wf_text_color = if self.show_waveform {
-                    egui::Color32::from_rgb(130, 170, 220)
-                } else {
-                    egui::Color32::from_gray(90)
-                };
-
-                ui.painter().rect_filled(wf_btn_rect, 10.0, wf_fill);
-                ui.painter().rect_stroke(wf_btn_rect, 10.0, egui::Stroke::new(1.0, wf_border), egui::StrokeKind::Outside);
-                ui.painter().text(
-                    wf_btn_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "WAVEFORM",
-                    egui::FontId::proportional(9.0),
-                    wf_text_color,
-                );
-
-                if self.show_waveform && !self.waveform_samples.is_empty() {
-                    use egui_plot::{Line, Plot, PlotPoints};
-
-                    let waveform_color = if self.clarity > 0.01 {
-                        gauge::cents_color(self.smoothed_cents.abs() as f32)
-                    } else {
-                        egui::Color32::from_gray(80)
-                    };
-
-                    let points: PlotPoints = self.waveform_samples
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &s)| [i as f64, s as f64])
-                        .collect();
-
-                    Plot::new("waveform")
-                        .height(80.0)
-                        .show_axes(false)
-                        .show_grid(false)
-                        .allow_zoom(false)
-                        .allow_drag(false)
-                        .allow_scroll(false)
-                        .allow_boxed_zoom(false)
-                        .show_x(false)
-                        .show_y(false)
-                        .show(ui, |plot_ui| {
-                            plot_ui.line(
-                                Line::new("wave", points)
-                                    .color(waveform_color)
-                                    .width(1.5),
-                            );
-                        });
-                }
             });
+
+            ui.painter().rect_stroke(screen_rect, 4.0, egui::Stroke::new(1.0, egui::Color32::from_white_alpha(12)), egui::StrokeKind::Inside);
+
+            // ============================================================
+            // ZONE: Strip — string buttons
+            // ============================================================
+            let strip_rect = egui::Rect::from_min_max(
+                egui::Pos2::new(px(self.zone_strip[0]), py(self.zone_strip[1])),
+                egui::Pos2::new(px(self.zone_strip[2]), py(self.zone_strip[3])),
+            );
+            let tuning = self.tunings[self.selected_tuning].clone();
+            let num_strings = tuning.strings.len();
+            let strip_w = strip_rect.width();
+            let auto_w = strip_w * 0.12;
+            let btn_gap = 3.0;
+            let sbtn_w = ((strip_w - auto_w - btn_gap * num_strings as f32) / num_strings as f32).max(30.0);
+            let btn_h = strip_rect.height();
+            let mut bx = strip_rect.left();
+
+            // Auto button
+            let auto_active = self.selected_string.is_none();
+            let auto_rect = egui::Rect::from_min_size(egui::Pos2::new(bx, strip_rect.top()), egui::Vec2::new(auto_w, btn_h));
+            let auto_resp = ui.interact(auto_rect, ui.id().with("auto_btn"), egui::Sense::click());
+            let auto_fill = if auto_active { egui::Color32::from_rgb(40, 45, 55) } else if auto_resp.hovered() { egui::Color32::from_rgb(50, 53, 60) } else { egui::Color32::from_rgb(35, 38, 45) };
+            draw_3d_button(ui.painter(), auto_rect, auto_fill, auto_resp.is_pointer_button_down_on(), 4.0);
+            ui.painter().text(auto_rect.center() - egui::vec2(0.0, 1.0), egui::Align2::CENTER_CENTER, "AUTO", egui::FontId::proportional(pw * 0.028),
+                if auto_active { egui::Color32::from_rgb(130, 200, 255) } else { egui::Color32::from_gray(140) });
+            if auto_active {
+                ui.painter().circle_filled(egui::Pos2::new(auto_rect.center().x, auto_rect.bottom() - 4.0), 2.0, egui::Color32::from_rgb(80, 180, 255));
+            }
+            if auto_resp.clicked() { self.selected_string = None; }
+            bx += auto_w + btn_gap;
+
+            for (i, s) in tuning.strings.iter().enumerate() {
+                let is_selected = self.selected_string == Some(i);
+                let is_playing = self.playing_string == Some(i);
+                let is_auto = self.selected_string.is_none() && self.auto_string_idx == Some(i) && self.clarity > 0.01;
+                let btn_rect = egui::Rect::from_min_size(egui::Pos2::new(bx, strip_rect.top()), egui::Vec2::new(sbtn_w, btn_h));
+                let note_rect = egui::Rect::from_min_max(btn_rect.min, egui::Pos2::new(btn_rect.right(), btn_rect.bottom() - btn_h * 0.28));
+                let play_rect = egui::Rect::from_min_max(egui::Pos2::new(btn_rect.left(), btn_rect.bottom() - btn_h * 0.28), btn_rect.max);
+                let note_resp = ui.interact(note_rect, ui.id().with(("str", i)), egui::Sense::click());
+                let play_resp = ui.interact(play_rect, ui.id().with(("play", i)), egui::Sense::click());
+                let pressed = note_resp.is_pointer_button_down_on() || play_resp.is_pointer_button_down_on();
+                let fill = if is_selected { egui::Color32::from_rgb(50, 60, 75) } else if is_auto { egui::Color32::from_rgb(45, 52, 58) }
+                    else if note_resp.hovered() || play_resp.hovered() { egui::Color32::from_rgb(50, 53, 60) } else { egui::Color32::from_rgb(35, 38, 45) };
+                let dr = draw_3d_button(ui.painter(), btn_rect, fill, pressed, 4.0);
+                let target_hz = s.frequency(self.a4_freq);
+                let nc = if is_selected { egui::Color32::WHITE } else if is_auto { gauge::cents_color(self.auto_string_cents.abs() as f32) } else { egui::Color32::from_gray(160) };
+                ui.painter().text(egui::Pos2::new(dr.center().x, dr.top() + btn_h * 0.32), egui::Align2::CENTER_CENTER, s.name, egui::FontId::proportional(pw * 0.038), nc);
+                let pc = if is_playing { egui::Color32::from_rgb(0, 240, 100) } else if play_resp.hovered() { egui::Color32::from_gray(160) } else { egui::Color32::from_gray(80) };
+                ui.painter().text(egui::Pos2::new(dr.center().x, dr.bottom() - btn_h * 0.14), egui::Align2::CENTER_CENTER, if is_playing { "\u{25A0}" } else { "\u{25B6}" }, egui::FontId::proportional(pw * 0.022), pc);
+                if is_selected || is_auto {
+                    let lc = if is_selected { egui::Color32::from_rgb(80, 180, 255) } else { gauge::cents_color(self.auto_string_cents.abs() as f32) };
+                    ui.painter().circle_filled(egui::Pos2::new(dr.center().x, dr.top() + btn_h * 0.56), 2.0, lc);
+                }
+                if note_resp.hovered() { note_resp.clone().on_hover_text(format!("{} — {:.1} Hz", s.name, target_hz)); }
+                if note_resp.clicked() { self.selected_string = Some(i); }
+                if play_resp.clicked() {
+                    if is_playing { self.tone_state.stop(); self.playing_string = None; }
+                    else { self.tone_state.set_frequency(target_hz as f32); self.tone_state.set_volume(self.tone_volume); self.playing_string = Some(i); }
+                }
+                bx += sbtn_w + btn_gap;
+            }
+
+            // ============================================================
+            // ZONE: Controls (vol slider + LED meter)
+            // ============================================================
+            let controls_rect = egui::Rect::from_min_max(
+                egui::Pos2::new(px(self.zone_controls[0]), py(self.zone_controls[1])),
+                egui::Pos2::new(px(self.zone_controls[2]), py(self.zone_controls[3])),
+            );
+            if self.playing_string.is_some() {
+                let vol_y = controls_rect.center().y - 3.0;
+                let tl = controls_rect.left() + 30.0;
+                let tr = controls_rect.right() - 40.0;
+                ui.painter().text(egui::Pos2::new(controls_rect.left() + 4.0, vol_y), egui::Align2::LEFT_CENTER, "VOL", egui::FontId::proportional(pw * 0.024), egui::Color32::from_gray(150));
+                let hit = egui::Rect::from_min_max(egui::Pos2::new(tl, vol_y - 10.0), egui::Pos2::new(tr, vol_y + 10.0));
+                let sr = ui.interact(hit, ui.id().with("vol_slider"), egui::Sense::click_and_drag());
+                if sr.dragged() || sr.clicked() {
+                    if let Some(pos) = sr.interact_pointer_pos() { self.tone_volume = 0.05 + ((pos.x - tl) / (tr - tl)).clamp(0.0, 1.0) * 0.45; self.tone_state.set_volume(self.tone_volume); }
+                }
+                let track = egui::Rect::from_min_max(egui::Pos2::new(tl, vol_y - 2.0), egui::Pos2::new(tr, vol_y + 2.0));
+                ui.painter().rect_filled(track, 2.0, egui::Color32::from_black_alpha(180));
+                let ff = (self.tone_volume - 0.05) / 0.45;
+                ui.painter().rect_filled(egui::Rect::from_min_max(track.min, egui::Pos2::new(tl + ff * (tr - tl), track.max.y)), 2.0, egui::Color32::from_rgb(80, 160, 255));
+                let tx = tl + ff * (tr - tl);
+                ui.painter().circle_filled(egui::Pos2::new(tx, vol_y), 4.0, egui::Color32::WHITE);
+                let stop_r = egui::Rect::from_min_max(egui::Pos2::new(tr + 4.0, vol_y - 8.0), egui::Pos2::new(controls_rect.right(), vol_y + 8.0));
+                let stop_resp = ui.interact(stop_r, ui.id().with("stop_btn"), egui::Sense::click());
+                ui.painter().text(stop_r.center(), egui::Align2::CENTER_CENTER, "STOP", egui::FontId::proportional(pw * 0.025),
+                    if stop_resp.hovered() { egui::Color32::from_rgb(255, 120, 120) } else { egui::Color32::from_rgb(200, 100, 100) });
+                if stop_resp.clicked() { self.tone_state.stop(); self.playing_string = None; }
+            }
+
+            // LED meter
+            let led_y = controls_rect.bottom() + 2.0;
+            let num_leds: usize = 32;
+            let led_gap = 1.5;
+            let led_w = ((controls_rect.width()) - led_gap * (num_leds - 1) as f32) / num_leds as f32;
+            let db = if self.rms_level > 0.0 { (20.0 * self.rms_level.log10()).clamp(-60.0, 0.0) } else { -60.0 };
+            let level = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+            let active_leds = (level * num_leds as f32).ceil() as usize;
+            for li in 0..num_leds {
+                let lx = controls_rect.left() + li as f32 * (led_w + led_gap);
+                let lr = egui::Rect::from_min_size(egui::Pos2::new(lx, led_y), egui::Vec2::new(led_w, 5.0));
+                let f = li as f32 / num_leds as f32;
+                let c = if f < 0.65 { egui::Color32::from_rgb(0, 200, 80) } else if f < 0.85 { egui::Color32::from_rgb(240, 190, 0) } else { egui::Color32::from_rgb(220, 50, 50) };
+                ui.painter().rect_filled(lr, 1.0, if li < active_leds { c } else { c.gamma_multiply(0.08) });
+            }
+
+            // ============================================================
+            // ZONE: Footswitch
+            // ============================================================
+            let fc = egui::Pos2::new(px(self.zone_foot_center[0]), py(self.zone_foot_center[1]));
+            let fr = pw * self.zone_foot_r;
+            let foot_resp = ui.interact(egui::Rect::from_center_size(fc, egui::Vec2::splat(fr * 2.0)), ui.id().with("footswitch"), egui::Sense::click());
+            if foot_resp.clicked() {
+                if self.playing_string.is_some() { self.tone_state.stop(); self.playing_string = None; }
+                else {
+                    let idx = self.selected_string.unwrap_or(0);
+                    let t = &self.tunings[self.selected_tuning];
+                    if idx < t.strings.len() { self.tone_state.set_frequency(t.strings[idx].frequency(self.a4_freq) as f32); self.tone_state.set_volume(self.tone_volume); self.playing_string = Some(idx); }
+                }
+            }
+            ui.painter().text(egui::Pos2::new(fc.x, fc.y + fr + pw * 0.04), egui::Align2::CENTER_CENTER,
+                if self.playing_string.is_some() { "STOP" } else { "PLAY" }, egui::FontId::proportional(pw * 0.03), egui::Color32::from_gray(140));
+
+            // Status LEDs
+            let led_base_y = py(self.zone_leds_y);
+            let ls = pw * 0.025;
+            let lbx = px(0.50) - ls;
+            let green_on = self.clarity > 0.01;
+            ui.painter().circle_filled(egui::Pos2::new(lbx, led_base_y), 3.0, if green_on { egui::Color32::from_rgb(0, 255, 80) } else { egui::Color32::from_rgb(0, 40, 15) });
+            if green_on { ui.painter().circle_filled(egui::Pos2::new(lbx, led_base_y), 7.0, egui::Color32::from_rgba_unmultiplied(0, 255, 80, 25)); }
+            let amber_on = self.playing_string.is_some();
+            ui.painter().circle_filled(egui::Pos2::new(lbx + ls * 2.0, led_base_y), 3.0, if amber_on { egui::Color32::from_rgb(255, 180, 0) } else { egui::Color32::from_rgb(50, 35, 0) });
+            if amber_on { ui.painter().circle_filled(egui::Pos2::new(lbx + ls * 2.0, led_base_y), 7.0, egui::Color32::from_rgba_unmultiplied(255, 180, 0, 25)); }
+
+            // Input device selector
+            if !self.input_devices.is_empty() {
+                let iy = py(0.92);
+                let cn = if self.selected_device == 0 { "Default" } else { self.input_devices.get(self.selected_device - 1).map(|s| s.as_str()).unwrap_or("Default") };
+                let ir = egui::Rect::from_center_size(egui::Pos2::new(px(0.5), iy), egui::Vec2::new(pw * 0.6, pw * 0.04));
+                let irsp = ui.interact(ir, ui.id().with("input_sel"), egui::Sense::click());
+                ui.painter().text(ir.center(), egui::Align2::CENTER_CENTER, format!("Input: {}", cn), egui::FontId::proportional(pw * 0.024),
+                    if irsp.hovered() { egui::Color32::from_gray(180) } else { egui::Color32::from_gray(100) });
+                if irsp.clicked() {
+                    self.selected_device = (self.selected_device + 1) % (self.input_devices.len() + 1);
+                    let dn = if self.selected_device == 0 { None } else { self.input_devices.get(self.selected_device - 1).map(|s| s.as_str()) };
+                    match AudioEngine::start(Arc::clone(&self.shared_buffer), dn) {
+                        Ok(e) => { self._audio_engine = Some(e); self.audio_error = None; }
+                        Err(e) => { self._audio_engine = None; self.audio_error = Some(format!("Audio error: {e}")); }
+                    }
+                }
+            }
         });
     }
 }

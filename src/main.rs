@@ -6,8 +6,8 @@ mod tuning;
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([400.0, 600.0])
-            .with_min_inner_size([350.0, 500.0]),
+            .with_inner_size([380.0, 570.0])
+            .with_min_inner_size([300.0, 450.0]),
         ..Default::default()
     };
 
