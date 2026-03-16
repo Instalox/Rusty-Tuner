@@ -49,16 +49,41 @@ impl AudioBuffer {
     }
 }
 
+/// List available input device names.
+pub fn list_input_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    host.input_devices()
+        .map(|devices| {
+            devices
+                .filter_map(|d| d.description().ok().map(|desc| desc.name().to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub struct AudioEngine {
     _stream: Stream,
 }
 
 impl AudioEngine {
-    pub fn start(shared: Arc<Mutex<AudioBuffer>>) -> anyhow::Result<Self> {
+    /// Start capturing from a named device, or the default if `device_name` is None.
+    pub fn start(
+        shared: Arc<Mutex<AudioBuffer>>,
+        device_name: Option<&str>,
+    ) -> anyhow::Result<Self> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or_else(|| anyhow::anyhow!("No input device found"))?;
+        let device = if let Some(name) = device_name {
+            host.input_devices()?
+                .find(|d| {
+                    d.description()
+                        .map(|desc| desc.name() == name)
+                        .unwrap_or(false)
+                })
+                .ok_or_else(|| anyhow::anyhow!("Input device '{name}' not found"))?
+        } else {
+            host.default_input_device()
+                .ok_or_else(|| anyhow::anyhow!("No input device found"))?
+        };
 
         let config = device.default_input_config()?;
         let channels = config.channels() as usize;
