@@ -31,17 +31,16 @@ pub fn cents_color(abs_cents: f32) -> Color32 {
 }
 
 pub fn draw_gauge(ui: &mut egui::Ui, cents: f64, clarity: f64, needle_angle: f32, time: f64) {
-    let avail_h = ui.available_height() - 20.0; // reserve ~20px for strobe below
+    let avail_h = ui.available_height() - 14.0; // reserve for strobe below
     let avail_w = ui.available_width();
     let desired_h = avail_h.max(30.0);
     let desired_size = Vec2::new(avail_w, desired_h);
     let (response, painter) = ui.allocate_painter(desired_size, egui::Sense::hover());
     let rect = response.rect;
 
-    // Semicircle: width needs 2*radius, height needs ~radius
-    // Use the tighter constraint but bias toward filling width
-    let max_r_from_w = rect.width() * 0.42;
-    let max_r_from_h = rect.height() * 0.85;
+    // Semicircle: height-limited, but allow it to be wide
+    let max_r_from_w = rect.width() * 0.45;
+    let max_r_from_h = rect.height() * 0.88;
     let radius = max_r_from_w.min(max_r_from_h).max(20.0);
     let s = radius / 100.0; // scale factor (1.0 at radius=100)
 
@@ -217,8 +216,8 @@ pub fn draw_gauge(ui: &mut egui::Ui, cents: f64, clarity: f64, needle_angle: f32
 /// Draw a strobe tuner bar. Bars scroll left/right proportional to cents deviation.
 /// At exactly 0 cents, the pattern freezes. Activates only when |cents| < threshold.
 pub fn draw_strobe(ui: &mut egui::Ui, cents: f64, clarity: f64, time: f64) {
-    let width = ui.available_width().min(360.0);
-    let height = ui.available_height().min(32.0).max(16.0);
+    let width = ui.available_width();
+    let height = 12.0; // fixed thin bar
     let (response, painter) = ui.allocate_painter(Vec2::new(width, height), egui::Sense::hover());
     let rect = response.rect;
 
