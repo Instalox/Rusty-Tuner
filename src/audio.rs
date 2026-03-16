@@ -168,9 +168,13 @@ impl ToneGenerator {
         let channels = config.channels() as usize;
         let stream_config = config.config();
 
+        // Karplus-Strong state
+        let mut delay_line: Vec<f32> = Vec::new();
+        let mut read_pos: usize = 0;
+        let mut last_freq: f32 = 0.0;
         let mut phase: f32 = 0.0;
-        // Smooth envelope to avoid clicks on start/stop
         let mut envelope: f32 = 0.0;
+        let feedback: f32 = 0.996;
 
         let stream = device.build_output_stream(
             &stream_config,
@@ -179,50 +183,69 @@ impl ToneGenerator {
                 let volume = state.volume();
                 let target_env = if freq > 0.0 { 1.0 } else { 0.0 };
 
-                for frame in data.chunks_mut(channels) {
-                    // Smooth envelope (attack/release ~5ms at 44.1kHz)
-                    envelope += (target_env - envelope) * 0.005;
+                // Reset last_freq on stop so re-play triggers a fresh pluck
+                if freq <= 0.0 {
+                    last_freq = 0.0;
+                }
 
-                    let sample = if envelope > 0.001 {
-                        let tau = 2.0 * std::f32::consts::PI;
-                        // Richer harmonic series — more harmonics for low notes
-                        // so they're audible on small speakers (missing fundamental)
-                        let harmonic_weight = |n: f32| -> f32 {
-                            // Below 150 Hz, boost upper harmonics significantly
-                            let base = 1.0 / n;
-                            if freq < 150.0 {
-                                base * (1.0 + (150.0 - freq) / 100.0)
-                            } else {
-                                base
-                            }
-                        };
-                        let mut s = (phase * tau).sin(); // fundamental
-                        s += (phase * 2.0 * tau).sin() * harmonic_weight(2.0);
-                        s += (phase * 3.0 * tau).sin() * harmonic_weight(3.0);
-                        s += (phase * 4.0 * tau).sin() * harmonic_weight(4.0);
-                        s += (phase * 5.0 * tau).sin() * harmonic_weight(5.0);
-                        s += (phase * 6.0 * tau).sin() * harmonic_weight(6.0);
-                        // Normalize so we don't clip
-                        let norm = 1.0
-                            + harmonic_weight(2.0)
-                            + harmonic_weight(3.0)
-                            + harmonic_weight(4.0)
-                            + harmonic_weight(5.0)
-                            + harmonic_weight(6.0);
-                        s / norm * volume * envelope
-                    } else {
-                        0.0
-                    };
+                // New note or frequency change → fresh pluck
+                if freq > 0.0 && (freq - last_freq).abs() > 0.5 {
+                    last_freq = freq;
+                    let delay_len = (sample_rate / freq).max(20.0) as usize;
+                    delay_line.resize(delay_len, 0.0);
 
-                    for ch in frame.iter_mut() {
-                        *ch = sample;
+                    // Deterministic noise burst for the pluck attack
+                    let mut seed = 0x5bd1e995u32;
+                    for sample in delay_line.iter_mut() {
+                        seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+                        let r = ((seed >> 16) & 0x7FFF) as f32 / 32767.0;
+                        *sample = (r * 2.0 - 1.0) * 0.85;
                     }
+                    read_pos = 0;
+                    phase = 0.0;
+                    envelope = 1.0;
+                }
 
-                    if freq > 0.0 {
+                for frame in data.chunks_mut(channels) {
+                    // Smooth envelope for stop (avoids clicks)
+                    envelope += (target_env - envelope) * 0.0005;
+
+                    let sample = if envelope > 0.001 && !delay_line.is_empty() && freq > 0.0 {
+                        let current = delay_line[read_pos];
+                        let next_idx = (read_pos + 1) % delay_line.len();
+                        let next = delay_line[next_idx];
+
+                        // KS low-pass averaging + feedback decay
+                        let filtered = (current + next) * 0.5 * feedback;
+
+                        // Small continuous excitation to sustain the tone
+                        // (sine at fundamental, just enough energy to prevent decay to silence)
+                        let excitation = (phase * 2.0 * std::f32::consts::PI).sin() * 0.006;
+                        delay_line[read_pos] = filtered + excitation;
+
                         phase += freq / sample_rate;
                         if phase >= 1.0 {
                             phase -= 1.0;
                         }
+
+                        read_pos = next_idx;
+                        current * volume * envelope
+                    } else {
+                        // Stopped — let the delay line ring out naturally
+                        if !delay_line.is_empty() && envelope > 0.0001 {
+                            let current = delay_line[read_pos];
+                            let next_idx = (read_pos + 1) % delay_line.len();
+                            let next = delay_line[next_idx];
+                            delay_line[read_pos] = (current + next) * 0.5 * feedback;
+                            read_pos = next_idx;
+                            current * volume * envelope
+                        } else {
+                            0.0
+                        }
+                    };
+
+                    for ch in frame.iter_mut() {
+                        *ch = sample;
                     }
                 }
             },
