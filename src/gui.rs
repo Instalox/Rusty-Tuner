@@ -157,6 +157,15 @@ impl TunerApp {
                 .or_default()
                 .push("digital7".to_owned());
         }
+        if let Ok(font_data) = std::fs::read("fonts/playball/Playball-Regular.ttf") {
+            fonts.font_data.insert(
+                "playball".to_owned(),
+                egui::FontData::from_owned(font_data).into(),
+            );
+            fonts.families.entry(egui::FontFamily::Name("playball".into()))
+                .or_default()
+                .insert(0, "playball".to_owned());
+        }
         cc.egui_ctx.set_fonts(fonts);
 
         // Dark theme
@@ -611,8 +620,8 @@ impl eframe::App for TunerApp {
             ui.painter().text(
                 egui::Pos2::new(px(0.50), py(self.zone_branding_y)),
                 egui::Align2::CENTER_CENTER,
-                "RustyTuner",
-                egui::FontId::proportional(pw * 0.05),
+                "Rusty Tuner",
+                egui::FontId::new(pw * 0.06, egui::FontFamily::Name("playball".into())),
                 egui::Color32::from_rgba_unmultiplied(200, 190, 170, 180),
             );
 

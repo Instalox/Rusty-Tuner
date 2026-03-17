@@ -213,111 +213,91 @@ pub fn draw_gauge(ui: &mut egui::Ui, cents: f64, clarity: f64, needle_angle: f32
     );
 }
 
-/// Draw a strobe tuner bar. Bars scroll left/right proportional to cents deviation.
-/// At exactly 0 cents, the pattern freezes. Activates only when |cents| < threshold.
 pub fn draw_strobe(ui: &mut egui::Ui, cents: f64, clarity: f64, time: f64) {
     let width = ui.available_width();
-    let height = 12.0; // fixed thin bar
+    let height = 12.0; // taller for LED blocks
     let (response, painter) = ui.allocate_painter(Vec2::new(width, height), egui::Sense::hover());
     let rect = response.rect;
 
     if clarity < 0.01 {
-        // Idle — dim empty bar
-        painter.text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "STROBE",
-            egui::FontId::proportional(10.0),
-            Color32::from_gray(45),
-        );
+        // Just draw the dark blocks if idle
+        let num_blocks: usize = 21;
+        let block_w = 8.0;
+        let block_h = 8.0;
+        let gap = 6.0;
+        let total_w = num_blocks as f32 * block_w + (num_blocks - 1) as f32 * gap;
+        let start_x = rect.center().x - total_w / 2.0;
+        let off_color = Color32::from_rgb(20, 15, 10);
+        
+        for i in 0..num_blocks {
+            let x = start_x + i as f32 * (block_w + gap);
+            let block_rect = egui::Rect::from_min_size(
+                Pos2::new(x, rect.center().y - block_h / 2.0),
+                Vec2::new(block_w, block_h)
+            );
+            painter.rect_filled(block_rect, 2.0, Color32::from_black_alpha(220));
+            painter.rect_stroke(block_rect, 2.0, Stroke::new(1.0, Color32::from_white_alpha(15)), egui::StrokeKind::Outside);
+            painter.rect_filled(block_rect.shrink(1.5), 1.0, off_color);
+        }
         return;
     }
 
-    let abs_cents = (cents as f32).abs();
+    // Fixed array of 21 blocks
+    let num_blocks: usize = 21;
+    let block_w = 8.0;
+    let block_h = 8.0;
+    let gap = 6.0;
+    let total_w = num_blocks as f32 * block_w + (num_blocks - 1) as f32 * gap;
+    let start_x = rect.center().x - total_w / 2.0;
 
-    // Strobe pattern: vertical bars that scroll based on cents offset.
-    // Speed is proportional to cents — at 0 cents, bars are frozen.
-    // Phase accumulates over time based on cents offset.
-    let bar_width = 8.0;
-    let gap = 8.0;
-    let period = bar_width + gap;
+    let amber = Color32::from_rgb(255, 150, 30);
+    let off_color = Color32::from_rgb(30, 15, 5);
+    
+    // Scroll speed based on cents
+    // Negative cents moves one way, positive the other
+    let scroll_speed = (cents * 0.9) as f32;
+    
+    for i in 0..num_blocks {
+        let x = start_x + i as f32 * (block_w + gap);
+        let block_rect = egui::Rect::from_min_size(
+            Pos2::new(x, rect.center().y - block_h / 2.0),
+            Vec2::new(block_w, block_h)
+        );
 
-    // Scroll offset: cents controls speed, time drives position
-    // Positive cents = sharp = bars move right, negative = flat = bars move left
-    let scroll_offset = (cents * time * 2.0) as f32;
-    // Wrap to avoid floating point issues over long runs
-    let offset = ((scroll_offset % period) + period) % period;
+        // Housing background
+        painter.rect_filled(block_rect, 2.0, Color32::from_black_alpha(220));
+        painter.rect_stroke(block_rect, 2.0, Stroke::new(1.0, Color32::from_white_alpha(15)), egui::StrokeKind::Outside);
 
-    // Bar color: green when close, yellow/red when far
-    let bar_color = if abs_cents < 1.0 {
-        GREEN
-    } else if abs_cents < 3.0 {
-        lerp_color(GREEN, YELLOW, (abs_cents - 1.0) / 2.0)
-    } else {
-        lerp_color(YELLOW, RED, ((abs_cents - 3.0) / 5.0).min(1.0))
-    };
+        // Wave equation for strobe effect
+        let phase = time as f32 * scroll_speed + (i as f32 * PI * 2.0 / 6.0); // 6 blocks per wave cycle
+        // Sharp pulses
+        let mut intensity = ((phase.sin() + 1.0) / 2.0).powf(4.0);
+        intensity *= clarity as f32;
 
-    // Brightness based on how close to in-tune (brighter = more precise)
-    let brightness = if abs_cents < 1.0 {
-        0.95
-    } else if abs_cents < 5.0 {
-        0.5 + 0.45 * (1.0 - (abs_cents - 1.0) / 4.0)
-    } else {
-        0.4
-    };
+        let current_color = lerp_color(off_color, amber, intensity);
+        let inner_rect = block_rect.shrink(1.5);
+        painter.rect_filled(inner_rect, 1.0, current_color);
 
-    // Draw scrolling bars
-    let mut x = rect.left() - period + offset;
-    while x < rect.right() + period {
-        let bar_left = x;
-        let bar_right = x + bar_width;
+        // Top edge gloss for 3D glassy look
+        painter.line_segment(
+            [inner_rect.left_top() + Vec2::new(1.0, 1.0), inner_rect.right_top() + Vec2::new(-1.0, 1.0)],
+            Stroke::new(1.0, Color32::from_white_alpha((100.0 * intensity) as u8 + 15))
+        );
 
-        // Clip to rect bounds
-        let clipped_left = bar_left.max(rect.left());
-        let clipped_right = bar_right.min(rect.right());
+        // Inner shadow / bottom bevel
+        painter.line_segment(
+            [inner_rect.left_bottom() + Vec2::new(1.0, -1.0), inner_rect.right_bottom() + Vec2::new(-1.0, -1.0)],
+            Stroke::new(1.0, Color32::from_black_alpha(150))
+        );
 
-        if clipped_left < clipped_right {
-            let bar_rect = egui::Rect::from_min_max(
-                Pos2::new(clipped_left, rect.top() + 2.0),
-                Pos2::new(clipped_right, rect.bottom() - 2.0),
+        // Glow emission for bright LEDs
+        if intensity > 0.4 {
+            painter.rect_stroke(
+                block_rect.expand(1.0),
+                3.0,
+                Stroke::new(2.0, amber.gamma_multiply(intensity * 0.6)),
+                egui::StrokeKind::Outside
             );
-            painter.rect_filled(bar_rect, 1.0, bar_color.gamma_multiply(brightness));
         }
-
-        x += period;
     }
-
-    // Faded edges (vignette)
-    let fade_width = 30.0;
-    for i in 0..15 {
-        let t = i as f32 / 15.0;
-        let alpha = ((1.0 - t) * 200.0) as u8;
-        let fade_color = Color32::from_rgba_unmultiplied(14, 16, 20, alpha);
-
-        // Left fade
-        let lx = rect.left() + t * fade_width;
-        painter.line_segment(
-            [Pos2::new(lx, rect.top()), Pos2::new(lx, rect.bottom())],
-            Stroke::new(fade_width / 15.0 + 0.5, fade_color),
-        );
-
-        // Right fade
-        let rx = rect.right() - t * fade_width;
-        painter.line_segment(
-            [Pos2::new(rx, rect.top()), Pos2::new(rx, rect.bottom())],
-            Stroke::new(fade_width / 15.0 + 0.5, fade_color),
-        );
-    }
-
-    // Center reference line
-    painter.line_segment(
-        [
-            Pos2::new(rect.center().x, rect.top()),
-            Pos2::new(rect.center().x, rect.bottom()),
-        ],
-        Stroke::new(1.5, Color32::from_rgba_unmultiplied(255, 255, 255, 60)),
-    );
-
-    // Border (Optional subtle line to frame the visual)
-    painter.rect_stroke(rect, 4.0, Stroke::new(1.0, Color32::from_white_alpha(10)), egui::StrokeKind::Outside);
 }
