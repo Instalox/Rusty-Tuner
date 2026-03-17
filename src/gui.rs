@@ -196,7 +196,7 @@ impl TunerApp {
 
         let tone_state = Arc::new(ToneState::new());
         let tone_generator = match ToneGenerator::start(Arc::clone(&tone_state)) {
-            Ok(gen) => Some(gen),
+            Ok(tg) => Some(tg),
             Err(e) => {
                 eprintln!("Could not start tone generator: {e}");
                 None
