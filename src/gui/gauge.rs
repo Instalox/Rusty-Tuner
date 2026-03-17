@@ -31,7 +31,7 @@ pub fn cents_color(abs_cents: f32) -> Color32 {
 }
 
 pub fn draw_gauge(ui: &mut egui::Ui, cents: f64, clarity: f64, needle_angle: f32, time: f64) {
-    let avail_h = ui.available_height() - 14.0; // reserve for strobe below
+    let avail_h = ui.available_height() - 22.0; // reserve for dual-row strobe below
     let avail_w = ui.available_width();
     let desired_h = avail_h.max(30.0);
     let desired_size = Vec2::new(avail_w, desired_h);
@@ -215,89 +215,136 @@ pub fn draw_gauge(ui: &mut egui::Ui, cents: f64, clarity: f64, needle_angle: f32
 
 pub fn draw_strobe(ui: &mut egui::Ui, cents: f64, clarity: f64, time: f64) {
     let width = ui.available_width();
-    let height = 12.0; // taller for LED blocks
+    let num_rows = 2;
+    let row_h = 6.0_f32;
+    let row_gap = 2.0_f32;
+    let height = num_rows as f32 * row_h + (num_rows - 1) as f32 * row_gap + 6.0; // padding
     let (response, painter) = ui.allocate_painter(Vec2::new(width, height), egui::Sense::hover());
     let rect = response.rect;
 
-    if clarity < 0.01 {
-        // Just draw the dark blocks if idle
-        let num_blocks: usize = 21;
-        let block_w = 8.0;
-        let block_h = 8.0;
-        let gap = 6.0;
-        let total_w = num_blocks as f32 * block_w + (num_blocks - 1) as f32 * gap;
-        let start_x = rect.center().x - total_w / 2.0;
-        let off_color = Color32::from_rgb(20, 15, 10);
-        
+    // Responsive: fill width with blocks
+    let num_blocks: usize = 25;
+    let usable_w = width * 0.92;
+    let gap = 3.0_f32;
+    let block_w = ((usable_w - (num_blocks - 1) as f32 * gap) / num_blocks as f32).max(4.0);
+    let total_w = num_blocks as f32 * block_w + (num_blocks - 1) as f32 * gap;
+    let start_x = rect.center().x - total_w / 2.0;
+    let base_y = rect.center().y - (num_rows as f32 * row_h + (num_rows - 1) as f32 * row_gap) / 2.0;
+
+    // Color based on how in-tune: green → amber → red
+    let abs_cents = (cents as f32).abs();
+    let on_color = if abs_cents < 2.0 {
+        Color32::from_rgb(0, 230, 100)
+    } else if abs_cents < 6.0 {
+        let t = (abs_cents - 2.0) / 4.0;
+        lerp_color(Color32::from_rgb(0, 230, 100), Color32::from_rgb(255, 170, 30), t)
+    } else if abs_cents < 18.0 {
+        let t = (abs_cents - 6.0) / 12.0;
+        lerp_color(Color32::from_rgb(255, 170, 30), Color32::from_rgb(230, 50, 40), t)
+    } else {
+        Color32::from_rgb(230, 50, 40)
+    };
+
+    // Matching dim off-color tinted toward the on color
+    let off_color = Color32::from_rgb(
+        (on_color.r() as f32 * 0.08) as u8 + 8,
+        (on_color.g() as f32 * 0.06) as u8 + 6,
+        (on_color.b() as f32 * 0.04) as u8 + 4,
+    );
+
+    // Scroll speed: proportional to cents, slows near zero for freeze effect
+    let scroll_speed = if abs_cents < 1.5 {
+        // Ease to near-zero for in-tune freeze
+        (cents * 0.15 * (abs_cents / 1.5) as f64) as f32
+    } else {
+        (cents * 0.85) as f32
+    };
+
+    // Blocks per wave cycle — tighter pattern
+    let blocks_per_cycle = 5.0_f32;
+
+    for row in 0..num_rows {
+        let y = base_y + row as f32 * (row_h + row_gap);
+        // Second row scrolls opposite direction and offset phase for depth
+        let dir = if row == 0 { 1.0 } else { -1.0 };
+        let phase_offset = row as f32 * PI * 0.7;
+
         for i in 0..num_blocks {
             let x = start_x + i as f32 * (block_w + gap);
             let block_rect = egui::Rect::from_min_size(
-                Pos2::new(x, rect.center().y - block_h / 2.0),
-                Vec2::new(block_w, block_h)
+                Pos2::new(x, y),
+                Vec2::new(block_w, row_h),
             );
-            painter.rect_filled(block_rect, 2.0, Color32::from_black_alpha(220));
-            painter.rect_stroke(block_rect, 2.0, Stroke::new(1.0, Color32::from_white_alpha(15)), egui::StrokeKind::Outside);
-            painter.rect_filled(block_rect.shrink(1.5), 1.0, off_color);
+
+            // Housing
+            painter.rect_filled(block_rect, 1.5, Color32::from_black_alpha(200));
+
+            // Strobe wave — two overlapping sine waves for smoother pattern
+            let pos = i as f32 * PI * 2.0 / blocks_per_cycle;
+            let phase1 = time as f32 * scroll_speed * dir + pos + phase_offset;
+            let phase2 = time as f32 * scroll_speed * dir * 0.7 + pos * 1.3 + phase_offset;
+            let wave1 = ((phase1.sin() + 1.0) / 2.0).powf(3.0);
+            let wave2 = ((phase2.sin() + 1.0) / 2.0).powf(3.0);
+            let mut intensity = (wave1 * 0.7 + wave2 * 0.3).min(1.0);
+
+            if clarity < 0.01 {
+                intensity = 0.0;
+            } else {
+                intensity *= clarity as f32;
+            }
+
+            let current_color = lerp_color(off_color, on_color, intensity);
+            let inner = block_rect.shrink(1.0);
+            painter.rect_filled(inner, 0.5, current_color);
+
+            // Top gloss highlight
+            if inner.width() > 2.0 {
+                painter.line_segment(
+                    [
+                        inner.left_top() + Vec2::new(0.5, 0.5),
+                        inner.right_top() + Vec2::new(-0.5, 0.5),
+                    ],
+                    Stroke::new(
+                        0.5,
+                        Color32::from_white_alpha((70.0 * intensity) as u8 + 8),
+                    ),
+                );
+            }
+
+            // Glow halo on bright LEDs
+            if intensity > 0.5 {
+                let glow_alpha = ((intensity - 0.5) * 2.0 * 0.45 * 255.0) as u8;
+                painter.rect_stroke(
+                    block_rect.expand(1.0),
+                    2.0,
+                    Stroke::new(
+                        1.5,
+                        Color32::from_rgba_unmultiplied(
+                            on_color.r(),
+                            on_color.g(),
+                            on_color.b(),
+                            glow_alpha,
+                        ),
+                    ),
+                    egui::StrokeKind::Outside,
+                );
+            }
         }
-        return;
     }
 
-    // Fixed array of 21 blocks
-    let num_blocks: usize = 21;
-    let block_w = 8.0;
-    let block_h = 8.0;
-    let gap = 6.0;
-    let total_w = num_blocks as f32 * block_w + (num_blocks - 1) as f32 * gap;
-    let start_x = rect.center().x - total_w / 2.0;
-
-    let amber = Color32::from_rgb(255, 150, 30);
-    let off_color = Color32::from_rgb(30, 15, 5);
-    
-    // Scroll speed based on cents
-    // Negative cents moves one way, positive the other
-    let scroll_speed = (cents * 0.9) as f32;
-    
-    for i in 0..num_blocks {
-        let x = start_x + i as f32 * (block_w + gap);
-        let block_rect = egui::Rect::from_min_size(
-            Pos2::new(x, rect.center().y - block_h / 2.0),
-            Vec2::new(block_w, block_h)
+    // In-tune indicator: subtle center glow when nearly perfect
+    if abs_cents < 2.0 && clarity > 0.01 {
+        let t = (1.0 - abs_cents / 2.0) * clarity as f32;
+        let glow_center = Pos2::new(rect.center().x, rect.center().y);
+        painter.circle_filled(
+            glow_center,
+            total_w * 0.15,
+            Color32::from_rgba_unmultiplied(0, 220, 100, (t * 25.0) as u8),
         );
-
-        // Housing background
-        painter.rect_filled(block_rect, 2.0, Color32::from_black_alpha(220));
-        painter.rect_stroke(block_rect, 2.0, Stroke::new(1.0, Color32::from_white_alpha(15)), egui::StrokeKind::Outside);
-
-        // Wave equation for strobe effect
-        let phase = time as f32 * scroll_speed + (i as f32 * PI * 2.0 / 6.0); // 6 blocks per wave cycle
-        // Sharp pulses
-        let mut intensity = ((phase.sin() + 1.0) / 2.0).powf(4.0);
-        intensity *= clarity as f32;
-
-        let current_color = lerp_color(off_color, amber, intensity);
-        let inner_rect = block_rect.shrink(1.5);
-        painter.rect_filled(inner_rect, 1.0, current_color);
-
-        // Top edge gloss for 3D glassy look
-        painter.line_segment(
-            [inner_rect.left_top() + Vec2::new(1.0, 1.0), inner_rect.right_top() + Vec2::new(-1.0, 1.0)],
-            Stroke::new(1.0, Color32::from_white_alpha((100.0 * intensity) as u8 + 15))
+        painter.circle_filled(
+            glow_center,
+            total_w * 0.06,
+            Color32::from_rgba_unmultiplied(0, 255, 120, (t * 45.0) as u8),
         );
-
-        // Inner shadow / bottom bevel
-        painter.line_segment(
-            [inner_rect.left_bottom() + Vec2::new(1.0, -1.0), inner_rect.right_bottom() + Vec2::new(-1.0, -1.0)],
-            Stroke::new(1.0, Color32::from_black_alpha(150))
-        );
-
-        // Glow emission for bright LEDs
-        if intensity > 0.4 {
-            painter.rect_stroke(
-                block_rect.expand(1.0),
-                3.0,
-                Stroke::new(2.0, amber.gamma_multiply(intensity * 0.6)),
-                egui::StrokeKind::Outside
-            );
-        }
     }
 }

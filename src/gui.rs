@@ -56,6 +56,10 @@ pub struct TunerApp {
     tone_volume: f32,
     playing_string: Option<usize>,
 
+    // VU meter peak hold
+    vu_peak: f32,
+    vu_peak_timer: f32,
+
     // Waveform display
     waveform_samples: Vec<f32>,
     show_waveform: bool,
@@ -232,6 +236,8 @@ impl TunerApp {
             tone_volume: 0.25,
             playing_string: None,
 
+            vu_peak: 0.0,
+            vu_peak_timer: 0.0,
             waveform_samples: Vec::new(),
             show_waveform: false,
 
@@ -321,6 +327,21 @@ impl eframe::App for TunerApp {
         };
 
         self.rms_level = rms;
+
+        // VU peak hold: track peak, hold for ~1s then decay
+        let dt = ctx.input(|i| i.predicted_dt);
+        let db_now = if rms > 0.0 { (20.0 * rms.log10()).clamp(-60.0, 0.0) } else { -60.0 };
+        let level_now = ((db_now + 60.0) / 60.0).clamp(0.0, 1.0);
+        if level_now >= self.vu_peak {
+            self.vu_peak = level_now;
+            self.vu_peak_timer = 1.0; // hold for 1 second
+        } else {
+            self.vu_peak_timer -= dt;
+            if self.vu_peak_timer <= 0.0 {
+                // Decay the peak
+                self.vu_peak = (self.vu_peak - dt * 0.8).max(level_now);
+            }
+        }
 
         // Grab ~20ms of waveform for display (~880 samples at 44.1kHz)
         let waveform_len = (sample_rate as usize / 50).min(samples.len());
@@ -831,26 +852,30 @@ impl eframe::App for TunerApp {
             );
 
             // Calculate internal bounds for Volume + Vertical Meter
-            let margin = pw * 0.015; // Decreased margin to push meter further right
-            let meter_w = pw * 0.045; // Increased meter width to scale it up
-            let slider_area_r = controls_rect.right() - meter_w - margin * 2.5;
-            
+            let margin = pw * 0.015;
+            let meter_w = pw * 0.055;
+            let slider_area_r = controls_rect.right() - meter_w - margin * 3.0;
+
             // --- VOLUME SLIDER ---
             let vol_y = controls_rect.top() + controls_rect.height() * 0.4;
             let tl = controls_rect.left() + pw * 0.12;
             let tr = slider_area_r;
-            
+
             // "VOL" Label
+            let vol_font = egui::FontId::new(pw * 0.024, egui::FontFamily::Name("digital7".into()));
             ui.painter().text(
-                egui::Pos2::new(controls_rect.left() + pw * 0.03, vol_y),
+                egui::Pos2::new(controls_rect.left() + pw * 0.025, vol_y),
                 egui::Align2::LEFT_CENTER,
                 "VOL",
-                egui::FontId::proportional(pw * 0.028),
-                egui::Color32::from_gray(160)
+                vol_font,
+                egui::Color32::from_gray(130),
             );
 
             // Slider interaction
-            let hit = egui::Rect::from_min_max(egui::Pos2::new(tl, vol_y - pw * 0.04), egui::Pos2::new(tr, vol_y + pw * 0.04));
+            let hit = egui::Rect::from_min_max(
+                egui::Pos2::new(tl, vol_y - pw * 0.04),
+                egui::Pos2::new(tr, vol_y + pw * 0.04),
+            );
             let sr = ui.interact(hit, ui.id().with("vol_slider"), egui::Sense::click_and_drag());
             if sr.dragged() || sr.clicked() {
                 if let Some(pos) = sr.interact_pointer_pos() {
@@ -858,141 +883,278 @@ impl eframe::App for TunerApp {
                     self.tone_state.set_volume(self.tone_volume);
                 }
             }
-            
-            // Segmented glowing track
-            let num_segments = 30;
-            let seg_gap = 2.0;
-            let seg_w = (tr - tl - seg_gap * (num_segments - 1) as f32) / num_segments as f32;
+
+            // Recessed track groove
+            let groove_h = pw * 0.01;
+            let groove_r = egui::Rect::from_min_size(
+                egui::Pos2::new(tl, vol_y - groove_h / 2.0),
+                egui::Vec2::new(tr - tl, groove_h),
+            );
+            ui.painter().rect_filled(groove_r, groove_h / 2.0, egui::Color32::from_rgb(8, 8, 10));
+            ui.painter().rect_stroke(groove_r, groove_h / 2.0, egui::Stroke::new(0.5, egui::Color32::from_black_alpha(200)), egui::StrokeKind::Inside);
+
+            // Segmented fill — amber with subtle gradient
+            let num_segments: usize = 28;
+            let seg_gap = 1.5_f32;
+            let seg_w = ((tr - tl) - seg_gap * (num_segments - 1) as f32) / num_segments as f32;
             let fill_idx = (self.tone_volume * num_segments as f32).round() as usize;
+            let seg_h = pw * 0.014;
 
             for i in 0..num_segments {
                 let x = tl + i as f32 * (seg_w + seg_gap);
-                let seg_r = egui::Rect::from_min_size(egui::Pos2::new(x, vol_y - pw * 0.008), egui::Vec2::new(seg_w, pw * 0.016));
-                
+                let seg_r = egui::Rect::from_min_size(
+                    egui::Pos2::new(x, vol_y - seg_h / 2.0),
+                    egui::Vec2::new(seg_w, seg_h),
+                );
+
                 if i < fill_idx {
-                    // Lit orange
-                    let dim = 1.0 - (i as f32 / num_segments as f32) * 0.3; // slightly dimmer to the left
-                    let c = egui::Color32::from_rgb(255, (160.0 * dim) as u8, 0);
+                    let frac = i as f32 / num_segments as f32;
+                    // Color: warm amber gradient, brighter toward the right
+                    let r = (200.0 + 55.0 * frac) as u8;
+                    let g = (130.0 + 30.0 * frac - 60.0 * frac * frac) as u8;
+                    let b = (10.0 + 15.0 * frac) as u8;
+                    let c = egui::Color32::from_rgb(r, g, b);
                     ui.painter().rect_filled(seg_r, 1.0, c);
-                    // Glow
-                    ui.painter().rect_filled(seg_r.expand(2.0), 2.0, c.linear_multiply(0.2));
+
+                    // Top gloss line
+                    ui.painter().line_segment(
+                        [seg_r.left_top() + egui::vec2(0.5, 0.5), seg_r.right_top() + egui::vec2(-0.5, 0.5)],
+                        egui::Stroke::new(0.5, egui::Color32::from_white_alpha((40.0 + 30.0 * frac) as u8)),
+                    );
+
+                    // Glow halo on the last few lit segments
+                    if i >= fill_idx.saturating_sub(3) {
+                        let glow_t = 1.0 - (fill_idx - 1 - i) as f32 / 3.0;
+                        ui.painter().rect_filled(
+                            seg_r.expand(1.5),
+                            2.0,
+                            c.linear_multiply(0.15 * glow_t),
+                        );
+                    }
                 } else {
-                    // Unlit dark brown/orange
-                    ui.painter().rect_filled(seg_r, 1.0, egui::Color32::from_rgb(40, 25, 10));
-                    ui.painter().rect_stroke(seg_r, 1.0, egui::Stroke::new(1.0, egui::Color32::from_black_alpha(200)), egui::StrokeKind::Outside);
+                    // Unlit: dark recessed segments
+                    ui.painter().rect_filled(seg_r, 1.0, egui::Color32::from_rgb(22, 18, 12));
+                    ui.painter().rect_stroke(
+                        seg_r, 1.0,
+                        egui::Stroke::new(0.5, egui::Color32::from_black_alpha(180)),
+                        egui::StrokeKind::Inside,
+                    );
                 }
             }
 
-            // Ticks and numbers below track
-            let num_ticks = 8; // represents 3..10
-            for i in 0..num_ticks {
-                let frac = i as f32 / (num_ticks - 1) as f32;
+            // Tick marks + number labels
+            let tick_positions: &[(f32, &str)] = &[
+                (0.0, "0"), (0.143, ""), (0.286, "3"), (0.429, ""),
+                (0.571, "5"), (0.714, ""), (0.857, "8"), (1.0, "10"),
+            ];
+            for &(frac, label) in tick_positions {
                 let tx = tl + frac * (tr - tl);
-                
-                // Tick mark
+                let is_major = !label.is_empty();
+                let tick_len = if is_major { pw * 0.025 } else { pw * 0.015 };
+                let tick_color = if is_major { egui::Color32::from_gray(90) } else { egui::Color32::from_gray(55) };
+
                 ui.painter().line_segment(
-                    [egui::Pos2::new(tx, vol_y + pw * 0.02), egui::Pos2::new(tx, vol_y + pw * 0.04)],
-                    egui::Stroke::new(1.0, egui::Color32::from_gray(80))
+                    [
+                        egui::Pos2::new(tx, vol_y + seg_h / 2.0 + 2.0),
+                        egui::Pos2::new(tx, vol_y + seg_h / 2.0 + 2.0 + tick_len),
+                    ],
+                    egui::Stroke::new(if is_major { 1.0 } else { 0.5 }, tick_color),
                 );
-                
-                // Sub-ticks
-                if i < num_ticks - 1 {
-                    let stx = tl + (frac + 0.5 / (num_ticks - 1) as f32) * (tr - tl);
-                    ui.painter().line_segment(
-                        [egui::Pos2::new(stx, vol_y + pw * 0.02), egui::Pos2::new(stx, vol_y + pw * 0.03)],
-                        egui::Stroke::new(1.0, egui::Color32::from_gray(60))
-                    );
-                }
-                
-                // Number label
-                if i != 3 { // skip ’6’ under knob center for aesthetics if we wanted, but we'll draw it
-                    let label = format!("{}", i + 3);
+
+                if is_major {
                     ui.painter().text(
-                        egui::Pos2::new(tx, vol_y + pw * 0.05),
+                        egui::Pos2::new(tx, vol_y + seg_h / 2.0 + 3.0 + tick_len),
                         egui::Align2::CENTER_TOP,
                         label,
-                        egui::FontId::proportional(pw * 0.020),
-                        egui::Color32::from_gray(110)
+                        egui::FontId::proportional(pw * 0.018),
+                        egui::Color32::from_gray(100),
                     );
                 }
             }
 
-            // 3D Knurled Metallic Knob
+            // --- Knob thumb ---
             let knob_x = tl + self.tone_volume * (tr - tl);
             let k_center = egui::Pos2::new(knob_x, vol_y);
-            let k_radius = pw * 0.028;
-            
+            let k_radius = pw * 0.026;
+
             // Drop shadow
-            ui.painter().circle_filled(k_center + egui::vec2(0.0, 3.0), k_radius + 2.0, egui::Color32::from_black_alpha(150));
+            ui.painter().circle_filled(
+                k_center + egui::vec2(0.0, 2.5),
+                k_radius + 1.5,
+                egui::Color32::from_black_alpha(140),
+            );
+
             // Outer dark ring
-            ui.painter().circle_filled(k_center, k_radius, egui::Color32::from_rgb(45, 48, 50));
-            ui.painter().circle_stroke(k_center, k_radius, egui::Stroke::new(1.0, egui::Color32::from_rgb(20, 22, 24)));
-            // Inner bright metallic disc
-            let k_inner = k_radius * 0.75;
-            ui.painter().circle_filled(k_center, k_inner, egui::Color32::from_rgb(110, 115, 120));
-            // Top highlight for 3D bevel
-            ui.painter().circle_stroke(k_center, k_inner, egui::Stroke::new(1.0, egui::Color32::from_white_alpha(100)));
-            // Knurling (radial ticks)
-            let knurl_count = 24;
+            ui.painter().circle_filled(k_center, k_radius, egui::Color32::from_rgb(42, 44, 48));
+            ui.painter().circle_stroke(
+                k_center, k_radius,
+                egui::Stroke::new(0.8, egui::Color32::from_rgb(18, 20, 22)),
+            );
+
+            // Inner metallic disc with gradient simulation
+            let k_inner = k_radius * 0.72;
+            ui.painter().circle_filled(k_center, k_inner, egui::Color32::from_rgb(95, 100, 108));
+
+            // Top-half highlight arc (simulate lighting from above)
+            let highlight_segs = 16;
+            for i in 0..highlight_segs {
+                let a0 = PI + (i as f32 / highlight_segs as f32) * PI;
+                let a1 = PI + ((i + 1) as f32 / highlight_segs as f32) * PI;
+                let p0 = k_center + egui::vec2(a0.cos() * k_inner, a0.sin() * k_inner);
+                let p1 = k_center + egui::vec2(a1.cos() * k_inner, a1.sin() * k_inner);
+                ui.painter().line_segment(
+                    [p0, p1],
+                    egui::Stroke::new(1.0, egui::Color32::from_white_alpha(70)),
+                );
+            }
+
+            // Knurling (radial grooves)
+            let knurl_count = 20;
             for i in 0..knurl_count {
                 let a = i as f32 * 2.0 * PI / knurl_count as f32;
-                let p1 = k_center + egui::vec2(a.cos() * k_inner, a.sin() * k_inner);
-                let p2 = k_center + egui::vec2(a.cos() * k_radius, a.sin() * k_radius);
-                ui.painter().line_segment([p1, p2], egui::Stroke::new(1.0, egui::Color32::from_gray(30)));
+                let p1 = k_center + egui::vec2(a.cos() * (k_inner + 0.5), a.sin() * (k_inner + 0.5));
+                let p2 = k_center + egui::vec2(a.cos() * (k_radius - 0.5), a.sin() * (k_radius - 0.5));
+                ui.painter().line_segment(
+                    [p1, p2],
+                    egui::Stroke::new(0.8, egui::Color32::from_gray(28)),
+                );
             }
-            // Dot indicator
-            ui.painter().circle_filled(k_center, pw * 0.005, egui::Color32::from_rgb(30, 30, 30));
 
+            // Center pointer line (points up)
+            let ptr_inner = k_center + egui::vec2(0.0, -k_inner * 0.3);
+            let ptr_outer = k_center + egui::vec2(0.0, -k_radius + 1.0);
+            ui.painter().line_segment(
+                [ptr_inner, ptr_outer],
+                egui::Stroke::new(1.5, egui::Color32::from_rgb(220, 140, 30)),
+            );
 
             // --- VERTICAL LED VU METER ---
             let meter_rect = egui::Rect::from_min_max(
                 egui::Pos2::new(controls_rect.right() - meter_w - margin, controls_rect.top() + margin),
-                egui::Pos2::new(controls_rect.right() - margin, controls_rect.bottom() - margin)
+                egui::Pos2::new(controls_rect.right() - margin, controls_rect.bottom() - margin),
             );
-            
-            // Recessed track
-            ui.painter().rect_filled(meter_rect, 4.0, egui::Color32::from_rgb(10, 12, 14));
-            ui.painter().rect_stroke(meter_rect, 4.0, egui::Stroke::new(1.0, egui::Color32::from_white_alpha(30)), egui::StrokeKind::Outside);
-            ui.painter().rect_stroke(meter_rect, 4.0, egui::Stroke::new(1.0, egui::Color32::from_black_alpha(200)), egui::StrokeKind::Inside);
-            
+
+            // Recessed bezel
+            ui.painter().rect_filled(meter_rect, 3.0, egui::Color32::from_rgb(6, 7, 9));
+            ui.painter().rect_stroke(
+                meter_rect, 3.0,
+                egui::Stroke::new(1.0, egui::Color32::from_black_alpha(220)),
+                egui::StrokeKind::Inside,
+            );
+            ui.painter().rect_stroke(
+                meter_rect, 3.0,
+                egui::Stroke::new(0.5, egui::Color32::from_white_alpha(20)),
+                egui::StrokeKind::Outside,
+            );
+
             // LED blocks (bottom to top)
-            let vu_leds = 14;
-            let gap_y = 2.0;
-            let led_h = (meter_rect.height() - gap_y * (vu_leds + 1) as f32) / vu_leds as f32;
-            let db = if self.rms_level > 0.0 { (20.0 * self.rms_level.log10()).clamp(-60.0, 0.0) } else { -60.0 };
+            let vu_leds: usize = 18;
+            let gap_y = 1.5_f32;
+            let pad_y = 3.0_f32;
+            let pad_x = 3.0_f32;
+            let led_h = (meter_rect.height() - pad_y * 2.0 - gap_y * (vu_leds - 1) as f32) / vu_leds as f32;
+            let led_w = meter_rect.width() - pad_x * 2.0;
+
+            let db = if self.rms_level > 0.0 {
+                (20.0 * self.rms_level.log10()).clamp(-60.0, 0.0)
+            } else {
+                -60.0
+            };
             let level = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
             let active_vu = (level * vu_leds as f32).ceil() as usize;
+            let peak_led = (self.vu_peak * vu_leds as f32).round() as usize;
 
             for i in 0..vu_leds {
-                // Determine color based on height
                 let frac = i as f32 / (vu_leds - 1) as f32;
-                let (base_c, glow_c) = if frac < 0.6 {
-                    (egui::Color32::from_rgb(0, 220, 80), egui::Color32::from_rgb(0, 255, 100))
-                } else if frac < 0.85 {
-                    (egui::Color32::from_rgb(255, 200, 0), egui::Color32::from_rgb(255, 230, 50))
+
+                // Smooth color gradient: green → yellow → orange → red
+                let base_c = if frac < 0.55 {
+                    let t = frac / 0.55;
+                    let r = (t * 180.0) as u8;
+                    let g = (180.0 + t * 40.0) as u8;
+                    let b = (80.0 - t * 60.0) as u8;
+                    egui::Color32::from_rgb(r, g, b)
+                } else if frac < 0.78 {
+                    let t = (frac - 0.55) / 0.23;
+                    let r = (180.0 + t * 60.0) as u8;
+                    let g = (220.0 - t * 40.0) as u8;
+                    egui::Color32::from_rgb(r, g, 20)
                 } else {
-                    (egui::Color32::from_rgb(240, 50, 50), egui::Color32::from_rgb(255, 80, 80))
+                    let t = (frac - 0.78) / 0.22;
+                    let r = (240.0 + t * 15.0) as u8;
+                    let g = (180.0 - t * 130.0) as u8;
+                    egui::Color32::from_rgb(r, g, (20.0 + t * 20.0) as u8)
                 };
-                
+
                 let is_on = i < active_vu;
-                let c = if is_on { base_c } else { base_c.linear_multiply(0.1) };
-                
-                let y = meter_rect.bottom() - gap_y - (i as f32 + 1.0) * led_h - i as f32 * gap_y;
+                let is_peak = i == peak_led.saturating_sub(1) && peak_led > active_vu && self.vu_peak > 0.01;
+
+                let y = meter_rect.bottom() - pad_y - (i as f32 + 1.0) * led_h - i as f32 * gap_y;
                 let led_r = egui::Rect::from_min_size(
-                    egui::Pos2::new(meter_rect.left() + 3.0, y),
-                    egui::Vec2::new(meter_rect.width() - 6.0, led_h)
+                    egui::Pos2::new(meter_rect.left() + pad_x, y),
+                    egui::Vec2::new(led_w, led_h),
                 );
-                
-                ui.painter().rect_filled(led_r, 1.0, c);
-                
+
                 if is_on {
-                    // Core brightness + subtle glow
-                    ui.painter().rect_filled(led_r.shrink(1.0), 0.5, glow_c);
-                    ui.painter().rect_stroke(led_r.expand(1.0), 2.0, egui::Stroke::new(1.0, base_c.linear_multiply(0.3)), egui::StrokeKind::Outside);
+                    // Lit LED
+                    ui.painter().rect_filled(led_r, 1.0, base_c);
+
+                    // Hot center highlight
+                    let inner = led_r.shrink2(egui::vec2(led_w * 0.15, 0.5));
+                    let bright = egui::Color32::from_rgb(
+                        (base_c.r() as f32 * 0.5 + 128.0) as u8,
+                        (base_c.g() as f32 * 0.5 + 128.0) as u8,
+                        (base_c.b() as f32 * 0.3 + 80.0).min(255.0) as u8,
+                    );
+                    ui.painter().rect_filled(inner, 0.5, bright.linear_multiply(0.5));
+
+                    // Glow emission
+                    ui.painter().rect_filled(
+                        led_r.expand(1.5),
+                        2.0,
+                        base_c.linear_multiply(0.15),
+                    );
+
+                    // Top gloss
+                    ui.painter().line_segment(
+                        [led_r.left_top() + egui::vec2(1.0, 0.5), led_r.right_top() + egui::vec2(-1.0, 0.5)],
+                        egui::Stroke::new(0.5, egui::Color32::from_white_alpha(60)),
+                    );
+                } else if is_peak {
+                    // Peak hold indicator — bright outline with dim fill
+                    ui.painter().rect_filled(led_r, 1.0, base_c.linear_multiply(0.6));
+                    ui.painter().rect_filled(
+                        led_r.expand(1.0),
+                        2.0,
+                        base_c.linear_multiply(0.1),
+                    );
                 } else {
-                    // Dark bevel
-                    ui.painter().rect_stroke(led_r, 1.0, egui::Stroke::new(1.0, egui::Color32::from_black_alpha(200)), egui::StrokeKind::Inside);
+                    // Off LED — dim with inner shadow
+                    ui.painter().rect_filled(led_r, 1.0, base_c.linear_multiply(0.07));
+                    ui.painter().rect_stroke(
+                        led_r, 1.0,
+                        egui::Stroke::new(0.5, egui::Color32::from_black_alpha(180)),
+                        egui::StrokeKind::Inside,
+                    );
                 }
+            }
+
+            // dB labels alongside meter
+            let label_x = meter_rect.left() - 2.0;
+            let db_labels: &[(f32, &str)] = &[
+                (0.0, "-60"), (0.33, "-40"), (0.55, "-20"),
+                (0.78, "-10"), (0.92, "-3"), (1.0, "0"),
+            ];
+            for &(frac, label) in db_labels {
+                let led_i = (frac * (vu_leds - 1) as f32).round();
+                let y = meter_rect.bottom() - pad_y - (led_i + 0.5) * led_h - led_i * gap_y;
+                ui.painter().text(
+                    egui::Pos2::new(label_x, y),
+                    egui::Align2::RIGHT_CENTER,
+                    label,
+                    egui::FontId::proportional(pw * 0.014),
+                    egui::Color32::from_gray(75),
+                );
             }
 
             // ============================================================
